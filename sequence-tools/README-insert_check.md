@@ -206,7 +206,7 @@ GCTAGCTAGCTAGCTAGCTA    barcode002
 
 ## License
 
-[Your license information here]
+GNU GENERAL PUBLIC LICENSE v3
 
 ## License
 
