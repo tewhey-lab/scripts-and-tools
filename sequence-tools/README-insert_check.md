@@ -65,34 +65,36 @@ python insert_check.py input.fastq [options]
 ### Example 1: Simple Direct Sequence Search
 ```bash
 python fastq_sequence_matcher.py reads.fastq \
-    --seq1 "ATCGATCGATCG" \
-    --seq1-dist 2
+    --seq1 "TCCTCAGTCGCGATCGAACA" \
+    --seq1-dist 3
 ```
 
 ### Example 2: Flanking Sequence with Barcode Extraction
 ```bash
 python insert_check.py reads.fastq \
-    --seq1 "ATTACA-GCTGCG" \
+    --seq1 "GTCGACGAACCTCTAGA-AGATCGGAAGAGCGT" \
     --seq1-dist 4 \
-    --seq1-insert 18:20 \
-    --ref-file1 barcodes.fasta \
+    --seq1-insert 18:22 \
+    --ref-file1 barcodes.ct.parsed \
     --match-method1 hamming \
-    --match-dist1 1
+    --match-dist1 0
 ```
 
 ### Example 3: Multiple Sequences with Different Parameters
 ```bash
 python insert_check.py reads.fastq \
-    --seq1 "ATTACA-GCTGCG" \
+    --seq1 "GTCGACGAACCTCTAGA-AGATCGGAAGAGCGT" \
     --seq1-dist 4 \
-    --seq1-insert 18:20 \
-    --ref-file1 barcodes.fasta \
+    --seq1-insert 18:22 \
+    --ref-file1 barcodes.ct.parsed \
     --match-method1 hamming \
-    --match-dist1 1 \
-    --seq2 "AAGGCCTT" \
+    --match-dist1 0 \
+    --seq2 "TCCTCAGTCGCGATCGAACA" \
     --seq2-dist 3 \
-    --seq3 "TTGACA-GTCATT" \
-    --seq3-insert 50:220 \
+    --seq3 "GCAGGACTGGCCGCTTGACG-CACTGCGGCTCCTGCGATTG" \
+    --seq3-dist 5 \
+    --seq3-insert 100:300 \
+    --ref-file3 OL54_reference.fasta \
     --match-method3 homology \
     --match-dist3 0.8 \
     --output-prefix OutputFileName
