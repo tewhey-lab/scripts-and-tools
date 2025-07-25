@@ -30,11 +30,17 @@
             background-color: white;
             border-radius: 0.5rem;
             box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-            overflow: hidden; /* Important for plotly resizing */
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .grid-stack-item-header {
+            cursor: move;
         }
         .plot-container {
             width: 100%;
             height: 100%;
+            flex-grow: 1;
         }
         .legend-panel {
             flex-shrink: 0;
@@ -115,21 +121,25 @@
                     <div class="grid-stack h-full">
                         <div class="grid-stack-item" gs-x="0" gs-y="0" gs-w="6" gs-h="6">
                             <div class="grid-stack-item-content">
+                                <div class="grid-stack-item-header bg-gray-100 p-2 text-sm font-semibold text-center text-gray-700">Fluorescence vs. Temperature</div>
                                 <div id="fluorescence_plot" class="plot-container"></div>
                             </div>
                         </div>
                         <div class="grid-stack-item" gs-x="6" gs-y="0" gs-w="6" gs-h="6">
                             <div class="grid-stack-item-content">
+                                <div class="grid-stack-item-header bg-gray-100 p-2 text-sm font-semibold text-center text-gray-700">Derivative vs. Temperature</div>
                                 <div id="derivative_plot" class="plot-container"></div>
                             </div>
                         </div>
                         <div class="grid-stack-item" gs-x="0" gs-y="6" gs-w="6" gs-h="6">
                             <div class="grid-stack-item-content">
+                                <div class="grid-stack-item-header bg-gray-100 p-2 text-sm font-semibold text-center text-gray-700">Rn vs. Cycle</div>
                                 <div id="rn_plot" class="plot-container"></div>
                             </div>
                         </div>
                         <div class="grid-stack-item" gs-x="6" gs-y="6" gs-w="6" gs-h="6">
                             <div class="grid-stack-item-content">
+                                <div class="grid-stack-item-header bg-gray-100 p-2 text-sm font-semibold text-center text-gray-700">Delta Rn vs. Cycle</div>
                                 <div id="delta_rn_plot" class="plot-container"></div>
                             </div>
                         </div>
@@ -327,6 +337,7 @@
                 float: false,
                 cellHeight: 'auto',
                 minRow: 1,
+                handle: '.grid-stack-item-header' // **FIX**: Only allow dragging from the header
             });
 
             AppState.grid.on('resizestop', function(event, el) {
@@ -336,7 +347,6 @@
                 }
             });
 
-            // **FIX**: Force a resize of all plots after the grid is initialized to prevent whitespace issues.
             setTimeout(() => {
                 const plotIds = ['fluorescence_plot', 'derivative_plot', 'rn_plot', 'delta_rn_plot'];
                 plotIds.forEach(id => {
@@ -345,7 +355,7 @@
                         Plotly.Plots.resize(plotEl);
                     }
                 });
-            }, 100); // A small delay allows the DOM to settle before resizing.
+            }, 100);
         }
 
         function populateFilters() {
@@ -430,18 +440,17 @@
                 return Object.values(traces);
             };
 
-            const plot_layout = (title, xtitle, ytitle) => ({
-                title: { text: title, font: { size: 16 } },
+            const plot_layout = (xtitle, ytitle) => ({
                 xaxis: { title: xtitle },
                 yaxis: { title: ytitle },
-                margin: { l: 60, r: 20, b: 50, t: 50 },
+                margin: { l: 60, r: 20, b: 50, t: 20 }, // Adjusted top margin for header
                 showlegend: false,
                 hovermode: 'closest'
             });
 
             // Fluorescence Plot
             const fluor_traces = trace_map(melt, 'Temperature', 'Fluorescence');
-            const fluor_layout = plot_layout('Fluorescence vs. Temperature', 'Temperature (°C)', 'Fluorescence');
+            const fluor_layout = plot_layout('Temperature (°C)', 'Fluorescence');
             if(AppState.plot_zoom.fluorescence_plot) {
                 fluor_layout.xaxis.range = AppState.plot_zoom.fluorescence_plot.xaxis.range;
                 fluor_layout.yaxis.range = AppState.plot_zoom.fluorescence_plot.yaxis.range;
@@ -450,7 +459,7 @@
 
             // Derivative Plot
             const deriv_traces = trace_map(melt, 'Temperature', 'Derivative');
-            const deriv_layout = plot_layout('Derivative vs. Temperature', 'Temperature (°C)', 'Derivative (-dF/dT)');
+            const deriv_layout = plot_layout('Temperature (°C)', 'Derivative (-dF/dT)');
             if(AppState.plot_zoom.derivative_plot) {
                 deriv_layout.xaxis.range = AppState.plot_zoom.derivative_plot.xaxis.range;
                 deriv_layout.yaxis.range = AppState.plot_zoom.derivative_plot.yaxis.range;
@@ -469,7 +478,7 @@
                 },
             };
             rn_traces.push(rn_markers);
-            const rn_layout = plot_layout('Rn vs. Cycle', 'Cycle', 'Rn (Normalized Reporter)');
+            const rn_layout = plot_layout('Cycle', 'Rn (Normalized Reporter)');
             if(AppState.plot_zoom.rn_plot) {
                 rn_layout.xaxis.range = AppState.plot_zoom.rn_plot.xaxis.range;
                 rn_layout.yaxis.range = AppState.plot_zoom.rn_plot.yaxis.range;
@@ -488,7 +497,7 @@
                 },
             };
             delta_rn_traces.push(delta_rn_markers);
-            const delta_rn_layout = plot_layout('Delta Rn vs. Cycle', 'Cycle', 'Delta Rn');
+            const delta_rn_layout = plot_layout('Cycle', 'Delta Rn');
             if(AppState.plot_zoom.delta_rn_plot) {
                 delta_rn_layout.xaxis.range = AppState.plot_zoom.delta_rn_plot.xaxis.range;
                 delta_rn_layout.yaxis.range = AppState.plot_zoom.delta_rn_plot.yaxis.range;
