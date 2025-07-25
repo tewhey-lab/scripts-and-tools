@@ -22,8 +22,13 @@
             display: flex;
             flex-direction: column;
         }
+        /* **FIX**: Use CSS Grid for robust row sizing */
+        #analysis-container {
+            display: grid;
+            grid-template-rows: 4fr 1fr; /* Creates an 80%/20% (4:1) split */
+            min-height: 0;
+        }
         .plot-grid-container {
-            flex-grow: 1;
             min-height: 0; /* Allows flex-grow to work correctly */
         }
         .grid-stack-item-content {
@@ -116,36 +121,36 @@
 
         <!-- Main Content -->
         <main class="w-3/4 p-6 main-content">
-            <div id="analysis-container" class="hidden flex flex-col h-full">
-                <div id="plot-area" class="plot-grid-container" style="flex: 1 1 80%;">
+            <div id="analysis-container" class="hidden h-full">
+                <div id="plot-area" class="plot-grid-container">
                     <div class="grid-stack h-full">
                         <div class="grid-stack-item" gs-x="0" gs-y="0" gs-w="6" gs-h="6">
                             <div class="grid-stack-item-content">
-                                <div class="grid-stack-item-header bg-gray-100 p-2 text-sm font-semibold text-center text-gray-700">Fluorescence vs. Temperature</div>
+                                <div class="grid-stack-item-header p-2 text-sm font-semibold text-center text-white" style="background-color: #009ED0;">Fluorescence vs. Temperature</div>
                                 <div id="fluorescence_plot" class="plot-container"></div>
                             </div>
                         </div>
                         <div class="grid-stack-item" gs-x="6" gs-y="0" gs-w="6" gs-h="6">
                             <div class="grid-stack-item-content">
-                                <div class="grid-stack-item-header bg-gray-100 p-2 text-sm font-semibold text-center text-gray-700">Derivative vs. Temperature</div>
+                                <div class="grid-stack-item-header p-2 text-sm font-semibold text-center text-white" style="background-color: #009ED0;">Derivative vs. Temperature</div>
                                 <div id="derivative_plot" class="plot-container"></div>
                             </div>
                         </div>
                         <div class="grid-stack-item" gs-x="0" gs-y="6" gs-w="6" gs-h="6">
                             <div class="grid-stack-item-content">
-                                <div class="grid-stack-item-header bg-gray-100 p-2 text-sm font-semibold text-center text-gray-700">Rn vs. Cycle</div>
+                                <div class="grid-stack-item-header p-2 text-sm font-semibold text-center text-white" style="background-color: #009ED0;">Rn vs. Cycle</div>
                                 <div id="rn_plot" class="plot-container"></div>
                             </div>
                         </div>
                         <div class="grid-stack-item" gs-x="6" gs-y="6" gs-w="6" gs-h="6">
                             <div class="grid-stack-item-content">
-                                <div class="grid-stack-item-header bg-gray-100 p-2 text-sm font-semibold text-center text-gray-700">Delta Rn vs. Cycle</div>
+                                <div class="grid-stack-item-header p-2 text-sm font-semibold text-center text-white" style="background-color: #009ED0;">Delta Rn vs. Cycle</div>
                                 <div id="delta_rn_plot" class="plot-container"></div>
                             </div>
                         </div>
                     </div>
                 </div>
-                <div id="legend-container" class="mt-6" style="flex: 0 0 20%;">
+                <div id="legend-container" class="mt-6">
                     <h3 class="font-semibold mb-2 text-gray-700">Legend</h3>
                     <div id="legend-panel" class="legend-panel bg-white rounded-lg shadow-md p-4 grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2 h-full">
                         <!-- Legend items will be injected here -->
