@@ -760,7 +760,7 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
             # Create upset plot data
             upset_data = from_contents(sequence_sets)
             
-            # Create the plot with percentages on both axes
+            # Create the plot without automatic percentages
             fig = plt.figure(figsize=(14, 10))
             upset = UpSet(upset_data, 
                          subset_size='count',
@@ -768,7 +768,7 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
                          totals_plot_elements=3,
                          show_counts='%d',
                          sort_by='cardinality',
-                         show_percentages=True)
+                         show_percentages=False)  # Disable automatic percentages
             upset.plot(fig=fig)
             
             # Get the axes to customize labels
