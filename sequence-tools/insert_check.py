@@ -784,6 +784,7 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
                     ax.set_yticks([tick for tick in y_ticks if tick >= 0])
                     ax.set_yticklabels(y_labels, fontsize=10)
                     ax.set_ylabel('Intersection Size', fontsize=11)
+                    ax.grid(False)  # Remove grid lines
                     
                     # Customize the percentage labels above bars
                     for text in ax.texts:
