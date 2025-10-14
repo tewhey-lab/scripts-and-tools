@@ -810,7 +810,7 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
                     ax.set_xticklabels(x_labels, fontsize=9)
                     ax.set_xlabel('Set Size\nCount and %', fontsize=11)
             
-            plt.suptitle('UpSet Plot of Sequence Match Combinations', fontsize=16, y=0.995)
+            plt.suptitle(f'{output_prefix} Match Combinations', fontsize=16, y=0.995)
             
             output_file = f'{output_prefix}_upset_plot.png'
             plt.savefig(output_file, dpi=300, bbox_inches='tight')
@@ -845,7 +845,7 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
             
             plt.xlabel('Sequence Combination')
             plt.ylabel('Percentage of Reads')
-            plt.title('Distribution of Sequence Matches')
+            plt.title(f'{output_prefix} Match Combinations')
             plt.xticks(range(len(combos)), combos, rotation=45, ha='right')
             plt.ylim(0, max(percentages) * 1.15 if percentages else 100)  # Add space for labels
             plt.tight_layout()
