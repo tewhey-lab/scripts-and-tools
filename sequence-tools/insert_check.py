@@ -43,6 +43,15 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+def sanitize_name(name: str) -> str:
+    """Sanitize custom sequence name for use in filenames."""
+    # Replace spaces with underscores
+    name = name.replace(' ', '_')
+    # Remove or replace problematic characters
+    name = ''.join(c for c in name if c.isalnum() or c in ('_', '-'))
+    return name
+
+
 def validate_sequence(seq: str) -> bool:
     """Validate that sequence contains only valid nucleotides."""
     valid_chars = set('ACGTUNRYSWKMBDHV')
@@ -725,7 +734,7 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
         logger.error(f"Error writing combined results: {e}")
         raise
     
-    # Report 3: Generate upset plot
+    # Report 3: Generate upset plot with percentages
     try:
         # Prepare data for upset plot
         # Create a dictionary where keys are sequence names and values are sets of read IDs
@@ -751,8 +760,8 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
             # Create upset plot data
             upset_data = from_contents(sequence_sets)
             
-            # Create the plot
-            plt.figure(figsize=(14, 10))
+            # Create the plot with percentages on both axes
+            fig = plt.figure(figsize=(14, 10))
             upset = UpSet(upset_data, 
                          subset_size='count',
                          intersection_plot_elements=6,
@@ -760,9 +769,42 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
                          show_counts='%d',
                          sort_by='cardinality',
                          show_percentages=True)
-            upset.plot()
+            upset.plot(fig=fig)
             
-            plt.suptitle('UpSet Plot of Sequence Match Combinations (Including No Matches)', fontsize=16)
+            # Get the axes to add percentage labels
+            axes = fig.get_axes()
+            
+            # Find the intersection size axis (usually the main bar plot)
+            for ax in axes:
+                # Check if this is the intersection size axis
+                if ax.get_ylabel() and 'Intersection size' in ax.get_ylabel():
+                    # Add percentages to y-axis labels
+                    y_ticks = ax.get_yticks()
+                    y_labels = []
+                    for tick in y_ticks:
+                        if tick >= 0 and total_reads > 0:
+                            pct = (tick / total_reads) * 100
+                            y_labels.append(f'{int(tick)}\n({pct:.1f}%)')
+                        else:
+                            y_labels.append(f'{int(tick)}')
+                    ax.set_yticklabels(y_labels, fontsize=9)
+                    ax.set_ylabel('Intersection Size\n(Count and %)', fontsize=11)
+                
+                # Check if this is the set size axis
+                elif ax.get_xlabel() and 'Set size' in ax.get_xlabel():
+                    # Add percentages to x-axis labels
+                    x_ticks = ax.get_xticks()
+                    x_labels = []
+                    for tick in x_ticks:
+                        if tick >= 0 and total_reads > 0:
+                            pct = (tick / total_reads) * 100
+                            x_labels.append(f'{int(tick)}\n({pct:.1f}%)')
+                        else:
+                            x_labels.append(f'{int(tick)}')
+                    ax.set_xticklabels(x_labels, fontsize=9)
+                    ax.set_xlabel('Set Size\n(Count and %)', fontsize=11)
+            
+            plt.suptitle('UpSet Plot of Sequence Match Combinations', fontsize=16, y=0.995)
             
             output_file = f'{output_prefix}_upset_plot.png'
             plt.savefig(output_file, dpi=300, bbox_inches='tight')
@@ -773,7 +815,7 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
             logger.warning("No data found - skipping upset plot generation")
             
     except ImportError:
-        logger.warning("upsetplot package not installed - generating standard bar plot instead")
+        logger.warning("upsetplot package not installed - generating standard bar plot with percentages instead")
         
         # Fall back to bar plot with percentages
         plt.figure(figsize=(12, 8))
@@ -812,38 +854,6 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
     except Exception as e:
         logger.error(f"Error generating upset plot: {e}")
         logger.warning("Upset plot generation failed - continuing without plot")
-                
-    
-    # Generate visualization
-    try:
-        plt.figure(figsize=(12, 8))
-        
-        # Filter to show only non-zero combinations
-        plot_data = [(combo, count) for combo, count in combination_counts.items() if count > 0]
-        plot_data.sort(key=lambda x: x[1], reverse=True)
-        
-        if plot_data:
-            combos = ['+'.join(c) if c else 'none' for c, _ in plot_data]
-            counts = [count for _, count in plot_data]
-            
-            plt.bar(range(len(combos)), counts)
-            plt.xlabel('Sequence Combination')
-            plt.ylabel('Number of Reads')
-            plt.title('Distribution of Sequence Matches')
-            plt.xticks(range(len(combos)), combos, rotation=45, ha='right')
-            plt.tight_layout()
-            
-            output_file = f'{output_prefix}_combination_plot.png'
-            plt.savefig(output_file, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            logger.info(f"Written plot to {output_file}")
-        else:
-            logger.warning("No matches found - skipping plot generation")
-            
-    except Exception as e:
-        logger.error(f"Error generating plot: {e}")
-        # Don't raise - plot is optional
 
 
 def validate_configuration(sequence_specs: Dict[str, Dict]) -> None:
@@ -882,16 +892,16 @@ def main() -> None:
         description='FASTQ sequence matcher with command-line sequences',
         epilog='''
 Examples:
-  # Flanking sequences with extraction
-  python script.py input.fastq --seq1 "ATCG-TGCA" --seq1-dist 2 --seq1-insert 10:30 --ref-file1 barcodes.tsv --match-method1 homology --match-dist1 0.8
+  # Flanking sequences with extraction and custom names
+  python script.py input.fastq --seq1 "ATCG-TGCA" --name1 "barcode" --seq1-dist 2 --seq1-insert 10:30 --ref-file1 barcodes.tsv --match-method1 homology --match-dist1 0.8
   
-  # Direct sequence matching
-  python script.py input.fastq --seq2 "ATCGATCG" --seq2-dist 1
+  # Direct sequence matching with custom name
+  python script.py input.fastq --seq2 "ATCGATCG" --name2 "promoter" --seq2-dist 1
   
-  # Multiple sequences with reverse complement
-  python script.py input.fastq --seq1 "ATCG-TGCA" --seq1-insert 10:30 --match-method1 levenshtein --match-dist1 3 --seq1-rc \\
-                               --seq2 "GGCCTTAA" \\
-                               --seq3 "ACTG-CAGT" --seq3-dist 3 --seq3-insert 5:25
+  # Multiple sequences with custom names and reverse complement
+  python script.py input.fastq --seq1 "ATCG-TGCA" --name1 "bc1" --seq1-insert 10:30 --match-method1 levenshtein --match-dist1 3 --seq1-rc \\
+                               --seq2 "GGCCTTAA" --name2 "marker" \\
+                               --seq3 "ACTG-CAGT" --name3 "bc2" --seq3-dist 3 --seq3-insert 5:25
         ''',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -909,6 +919,7 @@ Examples:
     # Allow multiple sequence specifications
     for i in range(1, 11):  # Support up to 10 sequences
         parser.add_argument(f'--seq{i}', help=f'Sequence {i} (format: "ATCG-TGCA" or "ATCGATCG")')
+        parser.add_argument(f'--name{i}', help=f'Custom name for sequence {i} (default: seq{i})')
         parser.add_argument(f'--seq{i}-dist', type=int, default=None, 
                           help=f'Max Levenshtein distance for seq{i} (default: 2)')
         parser.add_argument(f'--seq{i}-insert', help=f'Min:max insert size for flanking seq{i} (e.g., "10:30")')
@@ -936,7 +947,13 @@ Examples:
     for i in range(1, 11):
         seq_arg = getattr(args, f'seq{i}')
         if seq_arg:
-            seq_name = f'seq{i}'
+            # Get custom name or use default
+            custom_name = getattr(args, f'name{i}')
+            if custom_name:
+                seq_name = sanitize_name(custom_name)
+                logger.info(f"Using custom name '{seq_name}' for sequence {i}")
+            else:
+                seq_name = f'seq{i}'
             
             try:
                 # Get distance parameter (default to 2 if not specified)
@@ -995,17 +1012,17 @@ Examples:
                 ref_file = getattr(args, f'ref_file{i}')
                 if ref_file:
                     if not is_flanking:
-                        logger.warning(f"Reference file for seq{i} ignored (only used with flanking sequences)")
+                        logger.warning(f"Reference file for {seq_name} ignored (only used with flanking sequences)")
                         spec['reference'] = None
                     else:
                         if not Path(ref_file).exists():
                             logger.error(f"Reference file not found: {ref_file}")
                             sys.exit(1)
                         spec['reference'] = load_reference_sequences(ref_file)
-                        logger.info(f"Loaded {len(spec['reference'])} reference sequences for seq{i}")
-                        logger.info(f"Using {spec['match_method']} matching for seq{i} with threshold {match_dist}")
+                        logger.info(f"Loaded {len(spec['reference'])} reference sequences for {seq_name}")
+                        logger.info(f"Using {spec['match_method']} matching for {seq_name} with threshold {match_dist}")
                         if spec['reverse_complement']:
-                            logger.info(f"Will reverse complement extracted sequences for seq{i}")
+                            logger.info(f"Will reverse complement extracted sequences for {seq_name}")
                 else:
                     spec['reference'] = None
                 
