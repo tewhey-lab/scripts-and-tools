@@ -798,6 +798,7 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
                 
                 # Check if this is the set size axis
                 elif ax.get_xlabel() and 'Set size' in ax.get_xlabel():
+                    ax.grid(False)  # Remove grid lines
                     # Add percentages to x-axis labels
                     x_ticks = ax.get_xticks()
                     x_labels = []
