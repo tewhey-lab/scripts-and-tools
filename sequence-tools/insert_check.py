@@ -25,6 +25,7 @@ import argparse
 import sys
 import logging
 import time
+import warnings
 from collections import defaultdict, Counter
 from itertools import combinations
 from pathlib import Path
@@ -36,6 +37,11 @@ import Levenshtein
 import matplotlib.pyplot as plt
 import numpy as np
 from upsetplot import UpSet, from_contents
+
+# Suppress FutureWarnings from upsetplot/pandas compatibility
+warnings.filterwarnings('ignore', category=FutureWarning, module='upsetplot')
+warnings.filterwarnings('ignore', category=FutureWarning, message='.*fillna.*')
+warnings.filterwarnings('ignore', category=FutureWarning, message='.*inplace.*')
 
 
 # Set up logging
@@ -640,7 +646,12 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
         with open(output_file, 'w') as f:
             f.write("Combination\tCount\tProportion\n")
             
-            for combo in all_combinations:
+            # Sort combinations by count (descending)
+            sorted_combinations = sorted(all_combinations, 
+                                        key=lambda combo: combination_counts.get(combo, 0), 
+                                        reverse=True)
+            
+            for combo in sorted_combinations:
                 count = combination_counts.get(combo, 0)
                 proportion = count / total_reads if total_reads > 0 else 0
                 
@@ -774,6 +785,16 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
             # Remove grid lines from all axes
             for ax in fig.get_axes():
                 ax.grid(False)
+            
+            # Try to adjust the matrix plot row heights
+            for ax in fig.get_axes():
+                # The matrix plot typically doesn't have axis labels
+                if not ax.get_xlabel() and not ax.get_ylabel():
+                    try:
+                        # Adjust the aspect ratio to make rows more uniform
+                        ax.set_aspect('auto')
+                    except:
+                        pass
             
             # Get the axes to customize labels
             axes = fig.get_axes()
