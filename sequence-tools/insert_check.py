@@ -771,6 +771,10 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
                          show_percentages=True)
             upset.plot(fig=fig)
             
+            # Remove grid lines from all axes
+            for ax in fig.get_axes():
+                ax.grid(False)
+            
             # Get the axes to customize labels
             axes = fig.get_axes()
             
@@ -784,7 +788,6 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
                     ax.set_yticks([tick for tick in y_ticks if tick >= 0])
                     ax.set_yticklabels(y_labels, fontsize=10)
                     ax.set_ylabel('Intersection Size', fontsize=11)
-                    ax.grid(False)  # Remove grid lines
                     
                     # Customize the percentage labels above bars
                     for text in ax.texts:
@@ -798,7 +801,6 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
                 
                 # Check if this is the set size axis
                 elif ax.get_xlabel() and 'Set size' in ax.get_xlabel():
-                    ax.grid(False)  # Remove grid lines
                     # Add percentages to x-axis labels
                     x_ticks = ax.get_xticks()
                     x_labels = []
