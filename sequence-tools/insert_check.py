@@ -785,16 +785,23 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
                     ax.set_yticklabels(y_labels, fontsize=10)
                     ax.set_ylabel('Intersection Size', fontsize=11)
                     
-                    # Add percentage labels on bars (smaller and vertical)
+                    # Add count and percentage labels on bars (vertical, left-justified)
                     for patch in ax.patches:
                         height = patch.get_height()
                         if height > 0 and total_reads > 0:
+                            count = int(height)
                             pct = (height / total_reads) * 100
-                            # Position text at top of bar
-                            ax.text(patch.get_x() + patch.get_width()/2., height,
-                                   f'{pct:.1f}',
-                                   ha='center', va='bottom', 
-                                   fontsize=7, rotation=90)
+                            x_pos = patch.get_x() + patch.get_width()/2.
+                            # Add count label at top of bar
+                            ax.text(x_pos, height + (ax.get_ylim()[1] * 0.01),
+                                   f'{count}',
+                                   ha='left', va='bottom', 
+                                   fontsize=6, rotation=90)
+                            # Add percentage label above count
+                            ax.text(x_pos, height + (ax.get_ylim()[1] * 0.03),
+                                   f'{pct:.1f}%',
+                                   ha='left', va='bottom', 
+                                   fontsize=6, rotation=90)
                 
                 # Check if this is the set size axis
                 elif ax.get_xlabel() and 'Set size' in ax.get_xlabel():
@@ -824,7 +831,8 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
         logger.warning("upsetplot package not installed - generating standard bar plot with percentages instead")
         
         # Fall back to bar plot with percentages
-        plt.figure(figsize=(12, 8))
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.grid(False)  # Remove grid lines
         
         # Include all combinations, including empty (no matches)
         plot_data = [(combo, count) for combo, count in combination_counts.items()]
@@ -832,22 +840,31 @@ def generate_reports(results: Dict, output_prefix: str) -> None:
         
         if plot_data and total_reads > 0:
             combos = ['+'.join(c) if c else 'No_Match' for c, _ in plot_data]
+            counts = [count for _, count in plot_data]
             percentages = [(count / total_reads * 100) for _, count in plot_data]
             
-            bars = plt.bar(range(len(combos)), percentages)
+            bars = ax.bar(range(len(combos)), percentages)
             
-            # Add percentage labels on top of bars (smaller, vertical)
-            for i, (bar, pct) in enumerate(zip(bars, percentages)):
+            # Add count and percentage labels on top of bars (vertical, left-justified)
+            y_max = ax.get_ylim()[1]
+            for i, (bar, count, pct) in enumerate(zip(bars, counts, percentages)):
                 if pct > 0:  # Only label non-zero bars
-                    plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, 
-                            f'{pct:.1f}', ha='center', va='bottom', 
-                            fontsize=7, rotation=90)
+                    x_pos = bar.get_x() + bar.get_width()/2
+                    # Add count label at top of bar
+                    ax.text(x_pos, bar.get_height() + (y_max * 0.01), 
+                            f'{count}', ha='left', va='bottom', 
+                            fontsize=6, rotation=90)
+                    # Add percentage label above count
+                    ax.text(x_pos, bar.get_height() + (y_max * 0.03), 
+                            f'{pct:.1f}%', ha='left', va='bottom', 
+                            fontsize=6, rotation=90)
             
-            plt.xlabel('Sequence Combination')
-            plt.ylabel('Percentage of Reads')
-            plt.title(f'{output_prefix} Match Combinations')
-            plt.xticks(range(len(combos)), combos, rotation=45, ha='right')
-            plt.ylim(0, max(percentages) * 1.15 if percentages else 100)  # Add space for labels
+            ax.set_xlabel('Sequence Combination')
+            ax.set_ylabel('Percentage of Reads')
+            ax.set_title(f'{output_prefix} Match Combinations')
+            ax.set_xticks(range(len(combos)))
+            ax.set_xticklabels(combos, rotation=45, ha='right')
+            ax.set_ylim(0, max(percentages) * 1.2 if percentages else 100)  # Add space for labels
             plt.tight_layout()
             
             output_file = f'{output_prefix}_combination_plot.png'
