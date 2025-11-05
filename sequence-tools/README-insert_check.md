@@ -42,6 +42,7 @@ python insert_check.py input.fastq [options]
 
 #### Per-Sequence Options (replace # with 1-10)
 - `--seq# "SEQUENCE"`: Sequence to search (required)
+- `--name# NAME`: Custom name for sequence # (default: seq#). Names are sanitized for filenames (spaces→underscores, special chars removed)
 - `--seq#-dist N`: Maximum Levenshtein distance for matching (default: 2)
 - `--seq#-insert MIN:MAX`: Insert size range for flanking sequences (e.g., "10:30")
 - `--ref-file# FILE`: Reference file for matching (FASTA or TSV format)
@@ -64,41 +65,48 @@ python insert_check.py input.fastq [options]
 
 ### Example 1: Simple Direct Sequence Search
 ```bash
-python fastq_sequence_matcher.py reads.fastq \
+python insert_check.py reads.fastq \
     --seq1 "TCCTCAGTCGCGATCGAACA" \
     --seq1-dist 3
 ```
 
-### Example 2: Flanking Sequence with Barcode Extraction
+### Example 2: Flanking Sequence with Barcode Extraction and Custom Naming
 ```bash
 python insert_check.py reads.fastq \
     --seq1 "GTCGACGAACCTCTAGA-AGATCGGAAGAGCGT" \
+    --name1 "barcode" \
     --seq1-dist 4 \
     --seq1-insert 18:22 \
     --ref-file1 barcodes.ct.parsed \
     --match-method1 hamming \
     --match-dist1 0
 ```
+This example uses `--name1 "barcode"` to label the sequence as "barcode" instead of the default "seq1" in the output files.
 
-### Example 3: Multiple Sequences with Different Parameters
+### Example 3: Multiple Sequences with Different Parameters and Custom Names
 ```bash
 python insert_check.py reads.fastq \
     --seq1 "GTCGACGAACCTCTAGA-AGATCGGAAGAGCGT" \
+    --name1 "barcode" \
     --seq1-dist 4 \
     --seq1-insert 18:22 \
     --ref-file1 barcodes.ct.parsed \
     --match-method1 hamming \
     --match-dist1 0 \
     --seq2 "TCCTCAGTCGCGATCGAACA" \
+    --name2 "promoter" \
     --seq2-dist 3 \
     --seq3 "GCAGGACTGGCCGCTTGACG-CACTGCGGCTCCTGCGATTG" \
+    --name3 "amplicon" \
     --seq3-dist 5 \
     --seq3-insert 100:300 \
     --ref-file3 OL54_reference.fasta \
     --match-method3 homology \
     --match-dist3 0.8 \
+    --seq3-rc \
     --output-prefix OutputFileName
 ```
+This example demonstrates using custom names for all sequences and reverse complementing extracted sequences for seq3 before matching.
 
 ## Output Files
 
@@ -108,44 +116,44 @@ Summary statistics showing:
 - Total read counts and proportions
 - Individual sequence match rates
 
-Example:
+Example (with custom names):
 ```
-Combination     Count   Proportion
-none           245     0.0245
-seq1           1823    0.1823
-seq2           892     0.0892
-seq1+seq2      4521    0.4521
-seq1+seq2+seq3 2519    0.2519
+Combination              Count   Proportion
+none                     245     0.0245
+barcode                  1823    0.1823
+promoter                 892     0.0892
+barcode+promoter         4521    0.4521
+barcode+promoter+amplicon 2519   0.2519
 
 # Summary
 Total reads: 10000
 Reads with at least one match: 9755 (97.55%)
 
 # Individual sequence matches
-seq1: 8863 (88.63%)
-seq2: 7932 (79.32%)
-seq3: 2519 (25.19%)
+barcode: 8863 (88.63%)
+promoter: 7932 (79.32%)
+amplicon: 2519 (25.19%)
 ```
 
 ### 2. `{prefix}_combined_results.txt`
 Tab-delimited file with one row per read containing:
 - `Read_ID`: Sequence identifier from FASTQ
-- For each sequence:
-  - `seq#_match`: Yes/No indicating if sequence was found
-  - `seq#_extracted`: Extracted sequence (for flanking) or NA
-  - `seq#_match_id`: Best matching reference ID or NO_MATCH/NA
-  - `seq#_hamming/levenshtein/homology`: Similarity scores (0-1)
+- For each sequence (using custom names if specified, otherwise seq#):
+  - `{name}_match`: Yes/No indicating if sequence was found
+  - `{name}_extracted`: Extracted sequence (for flanking) or NA
+  - `{name}_match_id`: Best matching reference ID or NO_MATCH/NA
+  - `{name}_hamming/levenshtein/homology`: Similarity scores (0-1)
 
-Example:
+Example (with custom names):
 ```
-Read_ID    seq1_match  seq1_extracted  seq1_match_id  seq1_hamming  seq1_levenshtein  seq1_homology  seq2_match
-M01234:1   Yes         ATCGATCGATCGATCG BC001         1.000         0.950            0.980          No
-M01234:2   No          NA              NA             NA            NA               NA             Yes
-M01234:3   Yes         GCTAGCTAGCTAGCTA NO_MATCH      0.000         0.000            0.000          Yes
+Read_ID    barcode_match  barcode_extracted  barcode_match_id  barcode_hamming  barcode_levenshtein  barcode_homology  promoter_match
+M01234:1   Yes            ATCGATCGATCGATCG   BC001             1.000            0.950                0.980             No
+M01234:2   No             NA                 NA                NA               NA                   NA                Yes
+M01234:3   Yes            GCTAGCTAGCTAGCTA   NO_MATCH          0.000            0.000                0.000             Yes
 ```
 
 ### 3. `{prefix}_upset_plot.png` or `{prefix}_combination_plot.png`
-- **UpSet Plot**: Interactive-style visualization showing set intersections and sizes
+- **UpSet Plot**: Interactive-style visualization showing set intersections and sizes with percentage labels on both axes
 - **Bar Chart** (fallback): Shows percentage of reads for each combination
 - Includes "No_Match" category for reads with no sequence matches
 
@@ -167,6 +175,15 @@ GCTAGCTAGCTAGCTAGCTA    barcode002
 ```
 
 ## Advanced Features
+
+### Custom Sequence Naming
+
+You can assign custom names to sequences using the `--name#` parameter:
+- Custom names replace default names (seq1, seq2, etc.) in all output files
+- Names are automatically sanitized for use in filenames:
+  - Spaces are converted to underscores
+  - Special characters are removed (only alphanumeric, underscore, and hyphen allowed)
+- Example: `--name1 "my barcode"` becomes `my_barcode` in outputs
 
 ### Matching Methods Explained
 
