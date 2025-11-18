@@ -69,6 +69,7 @@ python insert_check.py input.fastq [options]
 - `--log-level {DEBUG,INFO,WARNING,ERROR}`: Logging verbosity (default: INFO)
 - `--no-progress`: Disable progress reporting
 - `--skip-count`: Skip initial read counting for faster startup
+- `--stream-references`: Stream reference files instead of loading into memory. Use for very large reference files (>1GB). Compatible with hamming/levenshtein; mappy/homology sequences will use normal mode automatically
 
 #### Pre-filtering Options
 - `--min-length N`: Minimum read length in bases. Reads shorter than this will be skipped
@@ -117,24 +118,41 @@ python insert_check.py reads.fastq \
     --match-dist1 0
 ```
 
-### Example 3: Multiple Sequences with Different Parameters
+### Example 3: MPRAv3 Plasmid Library
 ```bash
-python insert_check.py reads.fastq \
-    --seq1 "GTCGACGAACCTCTAGA-AGATCGGAAGAGCGT" \
-    --seq1-dist 4 \
-    --seq1-insert 18:22 \
-    --ref-file1 barcodes.ct.parsed \
-    --match-method1 hamming \
-    --match-dist1 0 \
-    --seq2 "TCCTCAGTCGCGATCGAACA" \
-    --seq2-dist 3 \
-    --seq3 "GCAGGACTGGCCGCTTGACG-CACTGCGGCTCCTGCGATTG" \
-    --seq3-dist 5 \
-    --seq3-insert 100:300 \
-    --ref-file3 OL54_reference.fasta \
-    --match-method3 homology \
-    --match-dist3 0.8 \
-    --output-prefix OutputFileName
+python insert_check.py read.fastq \
+--seq1 "CGCGTCGACGAACCTCTAGA-AGATCGGAAGAGCGTCGGCG" \
+--seq1-dist 5 \
+--seq1-insert 18:22 \
+--ref-file1 ../MPRAmatch.barcode.ct.parsed \
+--match-method1 hamming \
+--match-dist1 0 \
+--name1 "bc" \
+--seq1-rc \
+--seq2 "GCCTAACTGGCCGCTTGACG-CACTGCGGCTCCTGCGATCT" \
+--seq2-dist 5 \
+--seq2-insert 100:300 \
+--ref-file2 Oligo_reference.fasta \
+--match-method2 mappy \
+--match-dist2 0.8 \
+--name2 "oligo" \
+--seq3 "atttctctggcctaactggccggtacctgagctcgctagcctcgaggatatcaagatctggcctcggcggccaagctagtcggggc" \
+--seq3-dist 5 \
+--name3 "d-Oligo" \
+--seq4 "GCTCCTGCGATCGCGTCGAC" \
+--seq4-dist 5 \
+--name4 "d-GFP" \
+--seq5 "CTGGTCGAGCTGGACGGCGA" \
+--seq5-dist 5 \
+--name5 "GFP" \
+--seq6 "CAGGACTATAAAGATACCAG" \
+--seq6-dist 5 \
+--name6 "Ori" \
+--seq7 "ACAACACCGCGCCACATAGC" \
+--seq7-dist 5 \
+--name7 "AmpR" \
+--min-length 2000 --min-quality 10 --stream-references \
+--output-prefix Outfile
 ```
 
 ### Example 4: Pre-filtering for Read Length and Quality
@@ -158,6 +176,90 @@ python insert_check.py reads.fastq \
     --seq1-insert 18:22 \
     --min-quality 30 \
     --min-quality-percentile 95
+```
+
+### Example 6: Streaming Mode for Very Large Reference Files
+```bash
+# Use streaming mode when reference files are >1GB
+python insert_check.py reads.fastq \
+    --seq1 "GTCGACGAACCTCTAGA-AGATCGGAAGAGCGT" \
+    --seq1-dist 4 \
+    --seq1-insert 18:22 \
+    --ref-file1 very_large_barcodes.fasta \
+    --match-method1 hamming \
+    --match-dist1 1 \
+    --stream-references
+```
+
+## Streaming Mode for Large Reference Files
+
+When working with very large reference files (>1GB), you can use `--stream-references` to reduce memory usage. This mode is designed for scenarios where reference files are too large to fit in memory.
+
+### How Streaming Mode Works
+
+**Hybrid Processing Approach:**
+1. **Phase 1 - Load FASTQ Reads**: All FASTQ reads are loaded into memory and processed
+   - Sequences are extracted from reads
+   - Read data is cached for matching
+
+2. **Phase 2 - Stream References**: Reference files are streamed line-by-line
+   - Only one reference sequence in memory at a time
+   - Each reference is compared against all extracted sequences
+   - Best matches are tracked across the entire file
+   - Progress updates every 100,000 references
+
+**Method Compatibility:**
+- **Streaming-compatible**: `hamming` and `levenshtein` methods work with streaming mode
+- **Memory-required**: `mappy` and `homology` methods automatically fall back to normal mode (load entire reference into memory)
+- **Hybrid operation**: If you use multiple sequences with different methods, each will use the appropriate mode
+
+**Performance Optimizations:**
+- **Early termination**: Streaming stops when all sequences find perfect matches (distance = 0)
+- **Efficient iteration**: Only one reference sequence loaded at a time
+- **Progress tracking**: Reports progress every 100k references
+
+### When to Use Streaming Mode
+
+✅ **Use streaming when:**
+- Reference files are very large (>1GB)
+- You're using `hamming` or `levenshtein` matching
+- Memory is limited on your system
+- You want to process extremely large barcode libraries
+
+❌ **Don't use streaming when:**
+- Reference files are small (<100MB) - normal mode is faster
+- You need `mappy` or `homology` matching (will auto-fallback anyway)
+- You need the absolute fastest processing time
+
+### Example Scenarios
+
+**Scenario 1: Large barcode library with simple matching**
+```bash
+# 2GB barcode file with 100M barcodes, using Hamming distance
+python insert_check.py reads.fastq \
+    --seq1 "ATCG-GCTA" \
+    --seq1-insert 20:20 \
+    --ref-file1 huge_barcodes.fasta \
+    --match-method1 hamming \
+    --match-dist1 0 \
+    --stream-references
+```
+
+**Scenario 2: Mixed methods (automatic hybrid)**
+```bash
+# Barcode 1: streaming (hamming)
+# Barcode 2: normal mode (mappy, auto-fallback)
+python insert_check.py reads.fastq \
+    --seq1 "ATCG-GCTA" \
+    --seq1-insert 20:20 \
+    --ref-file1 large_barcodes.fasta \
+    --match-method1 hamming \
+    --seq2 "GGCC-TTAA" \
+    --seq2-insert 100:300 \
+    --ref-file2 reference_amplicons.fasta \
+    --match-method2 mappy \
+    --stream-references
+# seq1 uses streaming, seq2 automatically uses normal mode
 ```
 
 ## Output Files
@@ -363,10 +465,16 @@ GCTAGCTAGCTAGCTAGCTA    barcode002
 - Set appropriate error thresholds to balance sensitivity and specificity
 - Use pre-filtering (`--min-length`, `--max-length`, `--min-quality`) to reduce processing time by eliminating low-quality reads early
 - Pre-filtering is applied before sequence matching, improving overall throughput
+- **For very large reference files (>1GB)**: Use `--stream-references` with hamming or levenshtein methods to reduce memory usage
+- Streaming mode processes references one-at-a-time, trading speed for memory efficiency
+- Normal mode is faster for small-to-medium reference files (<100MB)
 
 ### Troubleshooting
 
-1. **Memory Issues**: Process files in chunks or on a high-memory system
+1. **Memory Issues**:
+   - Use `--stream-references` for large reference files (>1GB)
+   - Process FASTQ files in chunks or on a high-memory system
+   - Streaming mode reduces memory usage by loading one reference at a time
 2. **Slow Processing**:
    - Reduce maximum Levenshtein distance
    - Use more specific sequences
@@ -391,7 +499,7 @@ GNU GENERAL PUBLIC LICENSE v3
 
 ## License
 
-Code was partially built using Claude Opus 4. Use with caution.
+Code was partially built using Claude Code. Use with caution.
 
 ## Contact
 
