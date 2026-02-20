@@ -7,30 +7,11 @@ Tool for searching and extracting specific sequences from FASTQ files with suppo
 - **Sequence Matching**: Direct sequence search or flanking sequence extraction with fuzzy matching
 - **Pre-filtering**: Optional read length and quality score filtering to improve processing speed
 - **Multiple Algorithms**: Hamming, Levenshtein, homology-based matching, or ultra-fast minimap2 (mappy)
-- **Comprehensive Reports**: Matrix-format statistics, detailed per-read results, and multiple visualizations
-- **Advanced Visualizations** (300 DPI, publication-ready):
-  - Enhanced UpSet plots with dual-axis information (counts + percentages)
+- **Comprehensive Reports**: Match statistics, detailed per-read results, and multiple visualizations
+- **Visualizations**:
+  - UpSet plots with dual-axis information (counts + percentages)
   - Extraction/matching status by region (stacked barplots)
   - Pairwise match concordance analysis
-  - Professional styling: grid-free, clean labels, optimized spacing, no overlapping text
-- **Performance Optimized**: Hash table lookups, early termination, and optional mappy integration
-
-## Recent Enhancements
-
-**Version Updates:**
-- ✨ **Dual output formats**:
-  - Human-readable combination statistics (`_combination_stats.txt`)
-  - Binary matrix format for computational analysis (`_combination_matrix.txt`)
-- 📊 **Enhanced UpSet plots**: Dual-axis labels showing both counts and percentages
-- 🎨 **Professional styling**:
-  - Grid-free plots with clean labels
-  - Optimized title padding prevents text overlap
-  - Proper spacing between all plot elements
-- 📈 **New visualizations**:
-  - Extraction status plots (per-region success rates)
-  - Match concordance plots (pairwise barcode analysis)
-- 🔍 **Pre-filtering**: Optional read length and quality filtering
-- 🚀 **Performance**: Improved data representation and plotting efficiency
 
 ## Installation
 
@@ -40,12 +21,12 @@ Tool for searching and extracting specific sequences from FASTQ files with suppo
 #PIP INSTALL
 # Required packages
 pip install biopython pandas python-Levenshtein matplotlib numpy
-# Recommended for enhanced UpSet plots with dual-axis labels (falls back to bar chart if not installed)
+# Recommended for  UpSet plots (falls back to bar chart if not installed)
 pip install upsetplot
 
 #CONDA INSTALL
 conda install -c conda-forge biopython pandas python-levenshtein matplotlib numpy
-# Recommended: for enhanced UpSet plots
+# Recommended: for  UpSet plots
 conda install -c conda-forge upsetplot
 ```
 
@@ -264,7 +245,7 @@ python insert_check.py reads.fastq \
 
 ## Output Files
 
-The tool generates comprehensive reports and visualizations to analyze your sequencing data:
+The tool generates reports and visualizations to analyze your sequencing data:
 
 **Text Reports:**
 1. Combination statistics (human-readable format)
@@ -275,8 +256,6 @@ The tool generates comprehensive reports and visualizations to analyze your sequ
 4. UpSet plot or combination bar chart (sequence match combinations)
 5. Extraction status plot (success rates per region)
 6. Match concordance plot (pairwise barcode concordance)
-
-All plots are publication-ready at 300 DPI with professional styling.
 
 ---
 
@@ -319,8 +298,8 @@ oligo: 4100 (41.00% of analyzed)
 - Summary statistics for reporting
 - Human-readable format
 
-### 2. `{prefix}_combination_matrix.txt` **(NEW)**
-Binary matrix format with 1/0 columns for each sequence - optimized for computational analysis.
+### 2. `{prefix}_combination_matrix.txt
+Binary matrix format with 1/0 columns for each sequence.
 
 Example:
 ```
