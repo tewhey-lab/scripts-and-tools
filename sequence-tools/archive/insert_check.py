@@ -936,6 +936,112 @@ def passes_quality_filters(record, min_length: Optional[int] = None,
     return True, "pass"
 
 
+def process_single_read(record, sequence_specs: Dict, 
+                        min_length: Optional[int] = None, max_length: Optional[int] = None,
+                        min_quality: Optional[float] = None,
+                        min_quality_percentile: Optional[float] = None) -> Tuple[Optional[Dict], Optional[str]]:
+    """
+    Process a single read: filter, extract sequences, and prepare data.
+    
+    Args:
+        record: BioPython SeqRecord
+        sequence_specs: Dictionary of sequence specifications
+        min_length: Minimum read length filter
+        max_length: Maximum read length filter
+        min_quality: Minimum quality score filter
+        min_quality_percentile: Minimum quality percentile filter
+        
+    Returns:
+        tuple: (read_data, filter_reason)
+            read_data: Dict with extracted info or None if filtered
+            filter_reason: Reason for filtering or "pass"
+    """
+    # Apply quality filters
+    passes_filter, filter_reason = passes_quality_filters(
+        record, min_length, max_length, min_quality, min_quality_percentile
+    )
+    
+    if not passes_filter:
+        return None, filter_reason
+
+    read_id = record.id
+    sequence = str(record.seq)
+    
+    # Initialize read data
+    read_data = {
+        'read_id': read_id,
+        'matches': {},       # seq_name -> True/False (extraction/detection success)
+        'extracted': {},     # seq_name -> extracted sequence or NA
+        'match_ids': {},     # seq_name -> match ID or NO_MATCH or NA
+        'metrics': {}        # seq_name -> metrics dict or None
+    }
+    
+    # Cache reverse complement (computed only once if needed)
+    rev_comp = None
+    
+    # Check each sequence specification
+    for seq_name, spec in sequence_specs.items():
+        is_flanking = spec['is_flanking']
+        max_dist = spec['max_distance']
+        
+        matches_found = False
+        extracted_seq = 'NA'
+        
+        if is_flanking:
+            # Extract middle sequence
+            left_seq = spec['left_seq']
+            right_seq = spec['right_seq']
+            min_insert = spec['min_insert']
+            max_insert = spec['max_insert']
+            
+            # Try forward strand
+            middle = extract_middle_sequence(sequence, left_seq, right_seq,
+                                           max_dist, min_insert, max_insert)
+            
+            if middle:
+                matches_found = True
+                # Reverse complement if requested
+                if spec.get('reverse_complement', False):
+                    middle = str(Seq(middle).reverse_complement())
+                extracted_seq = middle
+            else:
+                # Try reverse complement only if forward fails
+                if rev_comp is None:
+                    rev_comp = str(record.seq.reverse_complement())
+                
+                middle = extract_middle_sequence(rev_comp, left_seq, right_seq,
+                                               max_dist, min_insert, max_insert)
+                
+                if middle:
+                    matches_found = True
+                    # Reverse complement if requested
+                    if spec.get('reverse_complement', False):
+                        middle = str(Seq(middle).reverse_complement())
+                    extracted_seq = middle
+                    
+        else:
+            # Direct sequence search
+            full_seq = spec['full_seq']
+            
+            # Try forward strand
+            if search_direct_sequence(sequence, full_seq, max_dist):
+                matches_found = True
+            else:
+                # Try reverse complement
+                if rev_comp is None:
+                    rev_comp = str(record.seq.reverse_complement())
+                if search_direct_sequence(rev_comp, full_seq, max_dist):
+                    matches_found = True
+        
+        read_data['matches'][seq_name] = matches_found
+        read_data['extracted'][seq_name] = extracted_seq
+        # match_ids and metrics will be filled in later (either immediately or after streaming)
+        read_data['match_ids'][seq_name] = 'NA'
+        read_data['metrics'][seq_name] = None
+
+    return read_data, "pass"
+
+
 def process_fastq_file(fastq_file: str, sequence_specs: Dict, output_prefix: str,
                       no_progress: bool = False, skip_count: bool = False,
                       min_length: Optional[int] = None, max_length: Optional[int] = None,
@@ -946,6 +1052,7 @@ def process_fastq_file(fastq_file: str, sequence_specs: Dict, output_prefix: str
     Process FASTQ file and search for all specified sequences.
 
     OPTIMIZATION: Pre-initialize aligners and mappy indices for each sequence spec.
+    MEMORY FIX: True streaming processing of reads.
 
     Args:
         fastq_file: Path to input FASTQ file
@@ -957,6 +1064,7 @@ def process_fastq_file(fastq_file: str, sequence_specs: Dict, output_prefix: str
         max_length: Maximum read length filter
         min_quality: Minimum quality score filter
         min_quality_percentile: Minimum quality percentile filter
+        stream_references: Whether to stream reference files (hybrid mode)
 
     Returns:
         dict: Results including combination counts and extracted sequences
@@ -965,36 +1073,38 @@ def process_fastq_file(fastq_file: str, sequence_specs: Dict, output_prefix: str
     if not Path(fastq_file).exists():
         raise FileNotFoundError(f"FASTQ file not found: {fastq_file}")
     
-    # OPTIMIZATION: Pre-initialize aligners and mappy indices
-    # Note: Streaming sequences have spec['reference'] = None, so they are skipped here
+    # Initialize aligners and mappy indices
     logger.info("Initializing sequence matchers...")
     aligners = {}
     mappy_indices = {}
-
+    
+    # Identify which sequences are streaming vs in-memory
+    streaming_sequences = {}  # seq_name -> spec
+    memory_sequences = {}     # seq_name -> spec
+    
     for seq_name, spec in sequence_specs.items():
-        if spec.get('reference'):
-            # Reference is loaded in memory - build index/aligner
+        if stream_references and spec.get('reference_file') and spec['match_method'] in ['hamming', 'levenshtein']:
+            streaming_sequences[seq_name] = spec
+            logger.info(f"  {seq_name}: Will use streaming reference matching")
+        elif spec.get('reference'):
+            memory_sequences[seq_name] = spec
+            # Initialize matchers for in-memory sequences
             match_method = spec.get('match_method', 'homology')
-
             if match_method == 'mappy':
-                # Build mappy index
                 if MAPPY_AVAILABLE:
                     logger.info(f"  Building mappy index for {seq_name} ({len(spec['reference'])} references)...")
                     start_time = time.time()
                     mappy_indices[seq_name] = MappyIndex(spec['reference'])
-                    build_time = time.time() - start_time
-                    logger.info(f"  Mappy index built in {build_time:.1f}s for {seq_name}")
+                    logger.info(f"  Mappy index built in {time.time() - start_time:.1f}s")
                 else:
                     raise ValueError(f"mappy not available for {seq_name}")
-
             elif match_method == 'homology':
-                # Initialize Bio.Align aligner
                 aligners[seq_name] = _get_default_aligner()
                 logger.info(f"  Pre-initialized Bio.Align aligner for {seq_name}")
-        elif spec.get('reference_file'):
-            # Reference will be streamed - skip initialization
-            logger.info(f"  Skipping initialization for {seq_name} (will use streaming mode)")
-    
+        else:
+            # Direct sequence or no reference
+            pass
+
     # Get file size for estimation
     file_size = Path(fastq_file).stat().st_size
     
@@ -1008,492 +1118,189 @@ def process_fastq_file(fastq_file: str, sequence_specs: Dict, output_prefix: str
         except:
             logger.warning("Could not count reads, will estimate progress based on file size")
     
-    # Track matches for each read
-    read_matches = []
-    extracted_sequences = defaultdict(list)
-    all_read_data = {}  # Store all data for each read
+    # Data structures for results
+    all_read_data = {}  # Store all data for each read {read_id: read_data}
     read_ids_ordered = []  # Maintain order of reads
+    
+    # For streaming mode: store extracted sequences to match later
+    # {seq_name: {read_id: sequence}}
+    extracted_for_streaming = defaultdict(dict)
+    
     total_reads = 0
     processed_reads = 0
     filtered_reads = 0
-    filter_reasons = Counter()  # Track reasons for filtering
+    filter_reasons = Counter()
     
     # Progress tracking
     start_time = time.time()
     last_progress_time = start_time
     progress_interval = 5  # seconds
-    
-    # Estimate bytes per read from first 1000 reads
     bytes_per_read_estimate = None
-
-    # HYBRID STREAMING MODE: Handle separately when enabled
-    if stream_references:
-        # Categorize sequences by streaming compatibility
-        streaming_sequences = {}  # hamming/levenshtein - can stream
-        memory_sequences = {}     # mappy/homology - need full reference
-
-        for seq_name, spec in sequence_specs.items():
-            # Check for reference_file (not reference, which is None in streaming mode)
-            if spec.get('reference_file'):
-                if spec['match_method'] in ['hamming', 'levenshtein']:
-                    streaming_sequences[seq_name] = spec
-                else:
-                    memory_sequences[seq_name] = spec
-
-        if memory_sequences:
-            logger.info(f"Hybrid mode: {len(memory_sequences)} sequence(s) will use normal loading "
-                       f"(incompatible with streaming: {', '.join(memory_sequences.keys())})")
-        if streaming_sequences:
-            logger.info(f"Hybrid mode: {len(streaming_sequences)} sequence(s) will use streaming "
-                       f"({', '.join(streaming_sequences.keys())})")
-
-        # PHASE 1: Load all FASTQ reads into memory
-        logger.info("="*60)
-        logger.info("PHASE 1: Loading all FASTQ reads into memory")
-        logger.info("="*60)
-
-        all_records = []
-        logger.info("Reading FASTQ file...")
-        with open(fastq_file, 'r') as handle:
-            for record in SeqIO.parse(handle, "fastq"):
-                total_reads += 1
-                all_records.append(record)
-
-        logger.info(f"Loaded {len(all_records):,} reads into memory")
-
-        # Process all reads and extract sequences
-        logger.info("Extracting sequences from all reads...")
-        extracted_for_streaming = defaultdict(dict)  # {seq_name: {read_id: sequence}}
-
-        # Progress tracking
-        total_to_process = len(all_records)
-        processed_count = 0
-        last_progress_time = time.time()
-        progress_interval = 5  # seconds
-        extraction_start_time = time.time()
-
-        for record in all_records:
-            read_id = record.id
-            sequence = str(record.seq)
-
-            # OPTIMIZATION: Cache reverse complement (computed only once if needed)
-            rev_comp = None
-
-            # Apply quality filters
-            passes_filter, filter_reason = passes_quality_filters(
-                record, min_length, max_length, min_quality, min_quality_percentile
+    
+    logger.info("="*60)
+    logger.info("PHASE 1: Processing reads (Extraction & In-memory Matching)")
+    logger.info("="*60)
+    
+    # Stream through FASTQ file
+    with open(fastq_file, 'r') as handle:
+        for record in SeqIO.parse(handle, "fastq"):
+            total_reads += 1
+            
+            # Process single read
+            read_data, filter_reason = process_single_read(
+                record, sequence_specs, min_length, max_length, min_quality, min_quality_percentile
             )
-            if not passes_filter:
+            
+            if not read_data:
                 filtered_reads += 1
                 filter_reasons[filter_reason] += 1
                 continue
-
-            # Only track reads that pass filters (sync with all_read_data)
+                
+            read_id = read_data['read_id']
             read_ids_ordered.append(read_id)
-
-            # Initialize read data
-            read_data = {
-                'read_id': read_id,
-                'matches': {},
-                'extracted': {},
-                'match_ids': {},
-                'metrics': {}
-            }
-
-            matches_found = set()
-
-            # Check each sequence specification
-            for seq_name, spec in sequence_specs.items():
-                if spec['is_flanking']:
-                    # Extract middle sequence
-                    left_seq = spec['left_seq']
-                    right_seq = spec['right_seq']
-                    min_insert = spec['min_insert']
-                    max_insert = spec['max_insert']
-                    max_dist = spec['max_distance']
-
-                    # Try forward strand
-                    middle = extract_middle_sequence(
-                        sequence, left_seq, right_seq, max_dist, min_insert, max_insert
-                    )
-
-                    if not middle:
-                        # Try reverse complement (cached)
-                        if rev_comp is None:
-                            rev_comp = str(Seq(sequence).reverse_complement())
-                        middle = extract_middle_sequence(
-                            rev_comp, left_seq, right_seq, max_dist, min_insert, max_insert
-                        )
-
-                    if middle:
-                        matches_found.add(seq_name)
-                        read_data['matches'][seq_name] = True
-
-                        # Reverse complement if requested
-                        if spec.get('reverse_complement', False):
-                            middle = str(Seq(middle).reverse_complement())
-
-                        read_data['extracted'][seq_name] = middle
-
-                        # Store for streaming if applicable
-                        if seq_name in streaming_sequences:
-                            extracted_for_streaming[seq_name][read_id] = middle
-                        # Match to reference if in memory mode
-                        elif spec.get('reference'):
-                            match_id, ref_seq, metrics = match_sequence_to_references_optimized(
-                                middle, spec['reference'], spec['match_method'],
-                                spec['match_dist'], aligners.get(seq_name), mappy_indices.get(seq_name)
-                            )
-                            read_data['match_ids'][seq_name] = match_id if match_id else 'NO_MATCH'
-                            read_data['metrics'][seq_name] = metrics
-                        else:
-                            read_data['match_ids'][seq_name] = 'NA'
-                            read_data['metrics'][seq_name] = None
-                    else:
-                        read_data['matches'][seq_name] = False
-                        read_data['extracted'][seq_name] = 'NA'
-                        read_data['match_ids'][seq_name] = 'NA'
-                        read_data['metrics'][seq_name] = None
-                else:
-                    # Direct sequence search
-                    full_seq = spec['full_seq']
-                    max_dist = spec['max_distance']
-
-                    if search_direct_sequence(sequence, full_seq, max_dist):
-                        matches_found.add(seq_name)
-                        read_data['matches'][seq_name] = True
-                    else:
-                        # Try reverse complement (cached)
-                        if rev_comp is None:
-                            rev_comp = str(Seq(sequence).reverse_complement())
-                        if search_direct_sequence(rev_comp, full_seq, max_dist):
-                            matches_found.add(seq_name)
-                            read_data['matches'][seq_name] = True
-                        else:
-                            read_data['matches'][seq_name] = False
-
-                    read_data['extracted'][seq_name] = 'NA'
-                    read_data['match_ids'][seq_name] = 'NA'
-                    read_data['metrics'][seq_name] = None
-
-            # Store read data
-            all_read_data[read_id] = read_data
-            if matches_found:
-                read_matches.append(tuple(sorted(matches_found)))
-            else:
-                read_matches.append(())
             processed_reads += 1
-            processed_count += 1
-
+            
+            # Handle matches
+            for seq_name, spec in sequence_specs.items():
+                # If extraction failed, nothing to do
+                if not read_data['matches'][seq_name]:
+                    continue
+                    
+                extracted_seq = read_data['extracted'][seq_name]
+                
+                # If this is a streaming sequence, save for later
+                if seq_name in streaming_sequences:
+                    extracted_for_streaming[seq_name][read_id] = extracted_seq
+                    
+                # If this is an in-memory sequence, match now
+                elif seq_name in memory_sequences:
+                    match_id, ref_seq, metrics = match_sequence_to_references_optimized(
+                        extracted_seq, spec['reference'], spec['match_method'],
+                        spec['match_dist'], aligners.get(seq_name), mappy_indices.get(seq_name)
+                    )
+                    read_data['match_ids'][seq_name] = match_id if match_id else 'NO_MATCH'
+                    read_data['metrics'][seq_name] = metrics
+            
+            # Store result
+            all_read_data[read_id] = read_data
+            
             # Progress reporting
             current_time = time.time()
-            if not no_progress and (current_time - last_progress_time >= progress_interval or processed_count % 10000 == 0):
-                elapsed = current_time - extraction_start_time
-                percent = (processed_count / total_to_process * 100)
-                rate = processed_count / elapsed if elapsed > 0 else 0
-                remaining = (total_to_process - processed_count) / rate if rate > 0 else 0
-
-                logger.info(f"Extraction progress: {processed_count:,}/{total_to_process:,} reads "
-                           f"({percent:.1f}%, {rate:.0f} reads/sec, "
-                           f"ETA: {int(remaining//60)}m {int(remaining%60)}s)")
+            if not no_progress and (current_time - last_progress_time >= progress_interval or total_reads % 10000 == 0):
+                elapsed_time = current_time - start_time
+                reads_per_second = total_reads / elapsed_time if elapsed_time > 0 else 0
+                
+                # Calculate percent complete
+                percent_complete = 0
+                if total_reads_estimate:
+                    percent_complete = (total_reads / total_reads_estimate * 100)
+                elif total_reads > 1000:
+                    # Estimate based on bytes
+                    if not bytes_per_read_estimate:
+                        bytes_per_read_estimate = file_size / total_reads * 0.9 # conservative
+                    estimated_total = file_size / bytes_per_read_estimate
+                    percent_complete = (total_reads / estimated_total * 100)
+                
+                eta_str = ""
+                if percent_complete > 0 and elapsed_time > 0:
+                    total_time_est = elapsed_time / (percent_complete / 100)
+                    remaining = total_time_est - elapsed_time
+                    eta_str = f", ETA: {int(remaining//60)}m {int(remaining%60)}s"
+                
+                logger.info(f"Progress: {total_reads:,} reads ({percent_complete:.1f}%{eta_str})")
                 last_progress_time = current_time
 
-        # Final extraction summary
-        extraction_time = time.time() - extraction_start_time
-        logger.info(f"Finished extracting sequences from {processed_count:,} reads in {extraction_time:.1f}s "
-                   f"({processed_count/extraction_time:.0f} reads/sec)")
-
-        # PHASE 2: Stream through reference files
+    # Phase 1 Summary
+    phase1_time = time.time() - start_time
+    logger.info(f"Finished Phase 1 in {phase1_time:.1f}s ({total_reads/phase1_time:.0f} reads/sec)")
+    
+    # PHASE 2: Streaming Reference Matching
+    if streaming_sequences:
         logger.info("="*60)
-        logger.info("PHASE 2: Streaming through reference files")
+        logger.info("PHASE 2: Streaming Reference Matching")
         logger.info("="*60)
-
-        for seq_name in streaming_sequences:
-            spec = streaming_sequences[seq_name]
+        
+        for seq_name, spec in streaming_sequences.items():
             if not extracted_for_streaming[seq_name]:
                 logger.info(f"Skipping {seq_name}: no sequences extracted")
                 continue
-
-            logger.info(f"\nProcessing {seq_name} ({len(extracted_for_streaming[seq_name])} sequences to match)")
-
-            # Get reference file path
-            reference_file = spec['reference_file']
-
-            # Stream and match
+                
+            logger.info(f"Processing {seq_name} ({len(extracted_for_streaming[seq_name])} sequences to match)")
+            
             matches, refs_checked = match_sequences_streaming(
                 extracted_for_streaming[seq_name],
-                reference_file,
+                spec['reference_file'],
                 spec['match_method'],
                 spec['match_dist']
             )
-
-            # Apply matches to read_data and calculate metrics
+            
+            # Update read data with results
             aligner = aligners.get(seq_name) or _get_default_aligner()
+            
             for read_id, (match_id, ref_seq, distance) in matches.items():
-                if match_id:
-                    # Calculate all metrics
-                    metrics = calculate_all_metrics(
-                        extracted_for_streaming[seq_name][read_id],
-                        ref_seq,
-                        aligner
-                    )
-                    all_read_data[read_id]['match_ids'][seq_name] = match_id
-                    all_read_data[read_id]['metrics'][seq_name] = metrics
-                else:
-                    all_read_data[read_id]['match_ids'][seq_name] = 'NO_MATCH'
-                    all_read_data[read_id]['metrics'][seq_name] = None
-
-            # Log Phase 2 results for this sequence
-            total_matched = sum(1 for _, (match_id, _, _) in matches.items() if match_id and match_id != 'NO_MATCH')
-            logger.info(f"  Matched {total_matched}/{len(matches)} sequences to references in {seq_name}")
-
-        # Rebuild match combinations based on actual Phase 2 results
-        logger.info("="*60)
-        logger.info("Finalizing match results")
-        logger.info("="*60)
-
-        read_matches = []
-        for read_id in read_ids_ordered:
-            if read_id not in all_read_data:
-                read_matches.append(())
-                continue
-
-            read_data = all_read_data[read_id]
-            matches_found = set()
-
-            for seq_name in sequence_specs.keys():
-                # Check if sequence was successfully extracted/detected
-                # Note: matches should be independent of whether it matched a reference
-                # For flanking: matches=True if extraction succeeded (regardless of reference match)
-                # For direct: matches=True if sequence was detected
-                is_matched = read_data['matches'].get(seq_name, False)
-
-                if is_matched:
-                    # Extraction/detection succeeded - add to matches_found
-                    # This is independent of whether it matched a reference (match_id)
-                    matches_found.add(seq_name)
-
-            if matches_found:
-                read_matches.append(tuple(sorted(matches_found)))
-            else:
-                read_matches.append(())
-
-        matched_count = sum(1 for m in read_matches if m != ())
-        logger.info(f"Final results: {matched_count}/{len(read_matches)} reads have at least one match")
-
-        # Skip to results section (don't execute normal processing loop)
-        total_time = time.time() - start_time
-        logger.info(f"Finished processing {total_reads:,} reads in {total_time:.1f} seconds")
-
-    else:
-        # NORMAL MODE: Stream FASTQ, references in memory
-        try:
-            with open(fastq_file, 'r') as handle:
-                for record in SeqIO.parse(handle, "fastq"):
-                    total_reads += 1
-
-                    # Estimate bytes per read from first 1000 reads
-                    if total_reads == 1000 and not total_reads_estimate:
-                        # Rough estimate: 4 lines per read, average line length
-                        avg_read_bytes = file_size / total_reads * 1000
-                        bytes_per_read_estimate = avg_read_bytes
-
-                    # Progress reporting
-                    current_time = time.time()
-                    if not no_progress and (current_time - last_progress_time >= progress_interval or total_reads % 10000 == 0):
-                        elapsed_time = current_time - start_time
-                        reads_per_second = total_reads / elapsed_time if elapsed_time > 0 else 0
-
-                        # Calculate progress
-                        if total_reads_estimate:
-                            percent_complete = (total_reads / total_reads_estimate * 100)
-                        elif bytes_per_read_estimate:
-                            estimated_total_reads = file_size / bytes_per_read_estimate
-                            percent_complete = (total_reads / estimated_total_reads * 100)
-                        else:
-                            percent_complete = 0
-
-                        # Estimate time remaining
-                        if percent_complete > 0 and elapsed_time > 0:
-                            total_time_estimate = elapsed_time / (percent_complete / 100)
-                            time_remaining = total_time_estimate - elapsed_time
-                            eta_str = f", ETA: {int(time_remaining // 60)}m {int(time_remaining % 60)}s"
-                        else:
-                            eta_str = ""
-
-                        logger.info(f"Progress: {total_reads:,} reads processed ({percent_complete:.1f}% complete, "
-                                  f"{reads_per_second:.0f} reads/sec{eta_str})")
-                        last_progress_time = current_time
-
-                    read_id = record.id
-
-                    # OPTIMIZATION: Cache reverse complement (computed only once if needed)
-                    rev_comp = None
-
-                    # Apply quality filters
-                    passes_filter, filter_reason = passes_quality_filters(
-                        record, min_length, max_length, min_quality, min_quality_percentile
-                    )
-
-                    if not passes_filter:
-                        filtered_reads += 1
-                        filter_reasons[filter_reason] += 1
-                        continue  # Skip this read
-
-                    read_ids_ordered.append(read_id)
-                    sequence = str(record.seq)
-
-                    # Initialize read data
-                    read_data = {
-                        'read_id': read_id,
-                        'matches': {},  # seq_name -> True/False
-                        'extracted': {},  # seq_name -> extracted sequence or NA
-                        'match_ids': {},  # seq_name -> match ID or NO_MATCH or NA
-                        'metrics': {}  # seq_name -> metrics dict or None
-                    }
-
-                    # Track which sequences matched for this read
-                    matches_found = set()
-
-                    # Check each sequence specification
-                    for seq_name, spec in sequence_specs.items():
-                        is_flanking = spec['is_flanking']
-                        max_dist = spec['max_distance']
-
-                        if is_flanking:
-                            # Extract middle sequence
-                            left_seq = spec['left_seq']
-                            right_seq = spec['right_seq']
-                            min_insert = spec['min_insert']
-                            max_insert = spec['max_insert']
-
-                            # Try forward strand
-                            middle = extract_middle_sequence(sequence, left_seq, right_seq,
-                                                           max_dist, min_insert, max_insert)
-                        
-                            if middle:
-                                matches_found.add(seq_name)
-                                read_data['matches'][seq_name] = True
-                                
-                                # Reverse complement if requested
-                                if spec.get('reverse_complement', False):
-                                    middle = str(Seq(middle).reverse_complement())
-                                
-                                read_data['extracted'][seq_name] = middle
-                                
-                                # Match to reference if available
-                                if spec['reference']:
-                                    # OPTIMIZATION: Pass pre-initialized aligner or mappy index
-                                    aligner = aligners.get(seq_name)
-                                    mappy_index = mappy_indices.get(seq_name)
-                                    match_id, ref_seq, metrics = match_sequence_to_references_optimized(
-                                        middle, spec['reference'], spec['match_method'], 
-                                        spec['match_dist'], aligner, mappy_index)
-                                    read_data['match_ids'][seq_name] = match_id if match_id else 'NO_MATCH'
-                                    read_data['metrics'][seq_name] = metrics
-                                    extracted_sequences[seq_name].append((read_id, middle, match_id, metrics))
-                                else:
-                                    read_data['match_ids'][seq_name] = 'NA'
-                                    read_data['metrics'][seq_name] = None
-                                    extracted_sequences[seq_name].append((read_id, middle, None, None))
-                            else:
-                                # Try reverse complement only if forward fails (cached)
-                                if rev_comp is None:
-                                    rev_comp = str(record.seq.reverse_complement())
-                                middle = extract_middle_sequence(rev_comp, left_seq, right_seq,
-                                                               max_dist, min_insert, max_insert)
-                                if middle:
-                                    matches_found.add(seq_name)
-                                    read_data['matches'][seq_name] = True
-                                    
-                                    # Reverse complement if requested
-                                    if spec.get('reverse_complement', False):
-                                        middle = str(Seq(middle).reverse_complement())
-                                    
-                                    read_data['extracted'][seq_name] = middle
-                                    
-                                    if spec['reference']:
-                                        # OPTIMIZATION: Pass pre-initialized aligner or mappy index
-                                        aligner = aligners.get(seq_name)
-                                        mappy_index = mappy_indices.get(seq_name)
-                                        match_id, ref_seq, metrics = match_sequence_to_references_optimized(
-                                            middle, spec['reference'], spec['match_method'], 
-                                            spec['match_dist'], aligner, mappy_index)
-                                        read_data['match_ids'][seq_name] = match_id if match_id else 'NO_MATCH'
-                                        read_data['metrics'][seq_name] = metrics
-                                        extracted_sequences[seq_name].append((read_id, middle, match_id, metrics))
-                                    else:
-                                        read_data['match_ids'][seq_name] = 'NA'
-                                        read_data['metrics'][seq_name] = None
-                                        extracted_sequences[seq_name].append((read_id, middle, None, None))
-                                else:
-                                    # No match found
-                                    read_data['matches'][seq_name] = False
-                                    read_data['extracted'][seq_name] = 'NA'
-                                    read_data['match_ids'][seq_name] = 'NA'
-                                    read_data['metrics'][seq_name] = None
-                        else:
-                                # Direct sequence search
-                                full_seq = spec['full_seq']
-                                
-                                # Try forward strand
-                                if search_direct_sequence(sequence, full_seq, max_dist):
-                                    matches_found.add(seq_name)
-                                    read_data['matches'][seq_name] = True
-                                else:
-                                    # Try reverse complement only if forward fails (cached)
-                                    if rev_comp is None:
-                                        rev_comp = str(record.seq.reverse_complement())
-                                    if search_direct_sequence(rev_comp, full_seq, max_dist):
-                                        matches_found.add(seq_name)
-                                        read_data['matches'][seq_name] = True
-                                    else:
-                                        read_data['matches'][seq_name] = False
-                                
-                                # Direct sequences don't have extraction
-                                read_data['extracted'][seq_name] = 'NA'
-                                read_data['match_ids'][seq_name] = 'NA'
-                                read_data['metrics'][seq_name] = None
-                
-                    # Store read data
-                    all_read_data[read_id] = read_data
-                    
-                    # Store match combination for this read
-                    if matches_found:
-                        read_matches.append(tuple(sorted(matches_found)))
+                if read_id in all_read_data:
+                    if match_id:
+                        metrics = calculate_all_metrics(
+                            extracted_for_streaming[seq_name][read_id],
+                            ref_seq,
+                            aligner
+                        )
+                        all_read_data[read_id]['match_ids'][seq_name] = match_id
+                        all_read_data[read_id]['metrics'][seq_name] = metrics
                     else:
-                        read_matches.append(())
-                        
-                    processed_reads += 1
+                        all_read_data[read_id]['match_ids'][seq_name] = 'NO_MATCH'
+                        all_read_data[read_id]['metrics'][seq_name] = None
+            
+            matched_count = sum(1 for _, (mid, _, _) in matches.items() if mid)
+            logger.info(f"  Matched {matched_count}/{len(matches)} sequences in {seq_name}")
 
-        except Exception as e:
-            logger.error(f"Error processing FASTQ file: {e}")
-            raise
+    # Finalize results
+    logger.info("="*60)
+    logger.info("Finalizing results")
+    logger.info("="*60)
     
-    # Final progress report
-    total_time = time.time() - start_time
-    logger.info(f"Finished processing {total_reads:,} reads in {total_time:.1f} seconds "
-                f"({total_reads/total_time:.0f} reads/sec)")
+    # Generate combinations
+    read_matches = []
+    extracted_sequences = defaultdict(list)
+    
+    for read_id in read_ids_ordered:
+        read_data = all_read_data[read_id]
+        matches_found = set()
+        
+        for seq_name in sequence_specs.keys():
+            # Check if extraction/detection succeeded
+            if read_data['matches'].get(seq_name, False):
+                matches_found.add(seq_name)
+                
+                # Add to extracted_sequences list for reporting/debugging if needed
+                # (Note: original code returned this, so we preserve it)
+                extracted = read_data['extracted'].get(seq_name)
+                match_id = read_data['match_ids'].get(seq_name)
+                metrics = read_data['metrics'].get(seq_name)
+                extracted_sequences[seq_name].append((read_id, extracted, match_id, metrics))
+        
+        if matches_found:
+            read_matches.append(tuple(sorted(matches_found)))
+        else:
+            read_matches.append(())
 
     # Report filtering statistics
     if filtered_reads > 0:
         logger.info(f"Filtered out {filtered_reads:,} reads ({filtered_reads/total_reads*100:.2f}%)")
         logger.info("Filter reasons:")
         for reason, count in filter_reasons.most_common():
-            logger.info(f"  {reason}: {count:,} reads ({count/filtered_reads*100:.2f}% of filtered)")
+            logger.info(f"  {reason}: {count:,} reads")
 
     # Count combinations
     combination_counts = Counter(read_matches)
-
+    
     # Generate all possible combinations
     all_seq_names = sorted(sequence_specs.keys())
     all_combinations = []
-
     for r in range(len(all_seq_names) + 1):
         for combo in combinations(all_seq_names, r):
             all_combinations.append(combo)
 
-    # Create results
     results = {
         'total_reads': total_reads,
         'processed_reads': processed_reads,
