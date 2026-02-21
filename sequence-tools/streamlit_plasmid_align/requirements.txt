@@ -3,3 +3,4 @@ mappy
 pandas
 numpy
 matplotlib
+requests

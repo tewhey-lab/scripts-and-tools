@@ -2,9 +2,50 @@
 
 import os
 import tempfile
+import requests
 import streamlit as st
 
 from plasmid_align import run_pipeline
+
+# ── GitHub plasmid library ───────────────────────────────────────────────────
+GITHUB_API_URL = (
+    "https://api.github.com/repos/tewhey-lab/scripts-and-tools"
+    "/contents/sequence-tools/plasmids"
+)
+GITHUB_RAW_BASE = (
+    "https://raw.githubusercontent.com/tewhey-lab/scripts-and-tools"
+    "/main/sequence-tools/plasmids"
+)
+
+
+@st.cache_data(ttl=600)
+def _fetch_plasmid_catalog():
+    """Return a dict {display_name: filename} of FASTA files in the repo."""
+    try:
+        resp = requests.get(GITHUB_API_URL, timeout=10)
+        resp.raise_for_status()
+        entries = resp.json()
+        catalog = {}
+        for entry in entries:
+            name = entry["name"]
+            if name.lower().endswith((".fasta", ".fa", ".fna")):
+                display = os.path.splitext(name)[0]
+                catalog[display] = name
+        return catalog
+    except Exception:
+        return {}
+
+
+def _download_plasmid(filename, dest_dir):
+    """Download a single FASTA file from the repo and return its local path."""
+    url = f"{GITHUB_RAW_BASE}/{filename}"
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    local_path = os.path.join(dest_dir, filename)
+    with open(local_path, "wb") as f:
+        f.write(resp.content)
+    return local_path
+
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Plasmid Aligner", layout="wide")
@@ -21,11 +62,30 @@ with st.sidebar:
         "FASTQ file", type=["fastq", "fq", "gz"],
         help="Oxford Nanopore FASTQ file (plain or gzip-compressed).",
     )
+
+    # ── Plasmid reference selection ──────────────────────────────────────────
+    st.subheader("Plasmid references")
+    plasmid_catalog = _fetch_plasmid_catalog()
+
+    selected_plasmids = []
+    if plasmid_catalog:
+        selected_plasmids = st.multiselect(
+            "Select from library",
+            options=sorted(plasmid_catalog.keys()),
+            help="Choose one or more plasmid references from the lab library.",
+        )
+    else:
+        st.caption("⚠️ Could not load plasmid library from GitHub.")
+
     fasta_files = st.file_uploader(
-        "FASTA reference(s)", type=["fasta", "fa", "fna"],
+        "Or upload custom FASTA(s)",
+        type=["fasta", "fa", "fna"],
         accept_multiple_files=True,
-        help="One or more plasmid FASTA files. Each may contain multiple sequences.",
+        help="Upload additional plasmid FASTA files. "
+             "These are combined with any selections above.",
     )
+
+    has_references = len(selected_plasmids) > 0 or len(fasta_files) > 0
 
     st.header("Parameters")
     min_qual = st.number_input(
@@ -42,12 +102,12 @@ with st.sidebar:
              "the read is called ambiguous.",
     )
     circular = st.checkbox(
-        "Circular mode",
+        "Circular mode", value=True,
         help="Double each reference to capture reads spanning the "
              "linearisation junction.",
     )
     fill_n = st.checkbox(
-        "Fill N regions",
+        "Fill N regions", value=True,
         help="Fill N-masked regions in references using the most homologous "
              "sequence from another reference in the library. Improves "
              "alignment coverage through masked regions.",
@@ -55,16 +115,26 @@ with st.sidebar:
     threads = st.slider("Threads", min_value=1, max_value=4, value=2)
 
 # ── Main area: run button + results ──────────────────────────────────────────
-can_run = fastq_file is not None and len(fasta_files) > 0
+can_run = fastq_file is not None and has_references
 
 if st.button("Run Alignment", disabled=not can_run, type="primary"):
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Write uploaded files to disk so mappy can access them
+        # Write uploaded FASTQ to disk
         fastq_path = os.path.join(tmpdir, fastq_file.name)
         with open(fastq_path, "wb") as f:
             f.write(fastq_file.getbuffer())
 
         fasta_paths = []
+
+        # Download selected library plasmids
+        if selected_plasmids:
+            with st.spinner("Downloading plasmid references …"):
+                for display_name in selected_plasmids:
+                    filename = plasmid_catalog[display_name]
+                    p = _download_plasmid(filename, tmpdir)
+                    fasta_paths.append(p)
+
+        # Write uploaded FASTA files to disk
         for uf in fasta_files:
             p = os.path.join(tmpdir, uf.name)
             with open(p, "wb") as f:
@@ -140,4 +210,7 @@ if st.button("Run Alignment", disabled=not can_run, type="primary"):
                 )
 
 elif not can_run:
-    st.info("Upload a FASTQ file and at least one FASTA reference to get started.")
+    st.info(
+        "Upload a FASTQ file and select at least one plasmid reference "
+        "(from the library or by uploading) to get started."
+    )
