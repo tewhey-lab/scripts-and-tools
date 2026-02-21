@@ -1890,19 +1890,21 @@ def run_pipeline(fastq_path, fasta_paths, min_qual=10.0, min_length=2000,
              f"ambig={srow['ambiguous_reads']:>4}")
     _log("=" * 60)
 
+    # ── counts (always computed; used by plots and returned to caller) ───────
+    counts = dict(
+        n_total    = n_total,
+        n_short    = n_short,
+        n_lowqual  = n_lowqual,
+        n_passed   = n_passed,
+        n_unmapped = n_unmapped,
+        n_ambiguous= n_ambiguous,
+    )
+
     # ── plots ────────────────────────────────────────────────────────────────
     if not no_plots:
         _log("\nGenerating visual report …")
         if progress_callback:
             progress_callback(n_passed, "Generating plots …")
-        counts = dict(
-            n_total    = n_total,
-            n_short    = n_short,
-            n_lowqual  = n_lowqual,
-            n_passed   = n_passed,
-            n_unmapped = n_unmapped,
-            n_ambiguous= n_ambiguous,
-        )
         with PdfPages(plots_path) as pdf:
             generate_readqc_plot(pre_filter_df, list(plasmids.keys()),
                                  min_length, min_qual, pdf)
@@ -1928,6 +1930,7 @@ def run_pipeline(fastq_path, fasta_paths, min_qual=10.0, min_length=2000,
         "log":          log,
         "output_path":  output_path,
         "summary_path": summary_path,
+        "counts":       counts,
     }
 
 

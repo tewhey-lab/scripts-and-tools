@@ -47,6 +47,21 @@ def _download_plasmid(filename, dest_dir):
     return local_path
 
 
+def _pdf_to_images(pdf_path):
+    """Convert each page of a PDF to a PNG byte buffer using PyMuPDF."""
+    images = []
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(pdf_path)
+        for page in doc:
+            pix = page.get_pixmap(dpi=150)
+            images.append(pix.tobytes("png"))
+        doc.close()
+    except ImportError:
+        pass  # PyMuPDF not installed; fall back to PDF download only
+    return images
+
+
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Plasmid Aligner", layout="wide")
 st.title("Plasmid Aligner")
@@ -173,15 +188,36 @@ if st.button("Run Alignment", disabled=not can_run, type="primary"):
         # ── Display results ──────────────────────────────────────────────
         st.success("Alignment complete!")
 
-        # Log
-        with st.expander("Pipeline log", expanded=False):
-            st.text("\n".join(result["log"]))
+        # ── Mapping statistics ───────────────────────────────────────────
+        counts = result["counts"]
+        summary_df = result["summary_df"]
+        n_unique = counts["n_passed"] - counts["n_unmapped"] - counts["n_ambiguous"]
 
-        # Summary table
+        st.subheader("Mapping statistics")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total reads", f"{counts['n_total']:,}")
+        m2.metric("Passed filters", f"{counts['n_passed']:,}")
+        pct_unique = 100 * n_unique / counts["n_passed"] if counts["n_passed"] else 0
+        m3.metric("Uniquely assigned", f"{n_unique:,} ({pct_unique:.1f}%)")
+        pct_ambig = 100 * counts["n_ambiguous"] / counts["n_passed"] if counts["n_passed"] else 0
+        m4.metric("Ambiguous", f"{counts['n_ambiguous']:,} ({pct_ambig:.1f}%)")
+
+        # Per-plasmid breakdown with percentages
         st.subheader("Per-plasmid summary")
-        st.dataframe(result["summary_df"], use_container_width=True)
+        display_df = summary_df.copy()
+        if n_unique > 0:
+            display_df["% of unique"] = (
+                display_df["assigned_reads"] / n_unique * 100
+            ).round(1)
+        n_assigned_total = counts["n_passed"] - counts["n_unmapped"]
+        if n_assigned_total > 0:
+            display_df["% of all assigned"] = (
+                (display_df["assigned_reads"] + display_df["ambiguous_reads"])
+                / n_assigned_total * 100
+            ).round(1)
+        st.dataframe(display_df, use_container_width=True)
 
-        # Download buttons
+        # ── Download buttons ─────────────────────────────────────────────
         col1, col2, col3 = st.columns(3)
 
         with open(result["output_path"], "rb") as f:
@@ -202,12 +238,30 @@ if st.button("Run Alignment", disabled=not can_run, type="primary"):
 
         if result["plots_path"] and os.path.exists(result["plots_path"]):
             with open(result["plots_path"], "rb") as f:
-                col3.download_button(
-                    "Download PDF report",
-                    data=f.read(),
-                    file_name="plasmid_alignment_report.pdf",
-                    mime="application/pdf",
+                pdf_bytes = f.read()
+            col3.download_button(
+                "Download PDF report",
+                data=pdf_bytes,
+                file_name="plasmid_alignment_report.pdf",
+                mime="application/pdf",
+            )
+
+        # ── Inline plot images ───────────────────────────────────────────
+        if result["plots_path"] and os.path.exists(result["plots_path"]):
+            st.subheader("Visual report")
+            page_images = _pdf_to_images(result["plots_path"])
+            if page_images:
+                for img_bytes in page_images:
+                    st.image(img_bytes, use_container_width=True)
+            else:
+                st.caption(
+                    "Install PyMuPDF (`pymupdf`) to display plots inline. "
+                    "The PDF is still available for download above."
                 )
+
+        # Log
+        with st.expander("Pipeline log", expanded=False):
+            st.text("\n".join(result["log"]))
 
 elif not can_run:
     st.info(
