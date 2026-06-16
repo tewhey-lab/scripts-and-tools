@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font: 13px/1.4 Arial, sans-serif; margin: 0; padding: 10px; color: #222; }
+    h2 { font-size: 15px; margin: 0 0 6px; }
+    .muted { color: #777; }
+    .summary { background: #f5f5f5; border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; }
+    .seg { display: inline-flex; border: 1px solid #1a73e8; border-radius: 6px; overflow: hidden; margin: 2px 0 10px; }
+    .seg button { border: 0; background: #fff; color: #1a73e8; padding: 5px 10px; cursor: pointer; font: 13px Arial; }
+    .seg button.on { background: #1a73e8; color: #fff; }
+    .card { border: 1px solid #ddd; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+    .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; color: #fff; }
+    .b-good { background: #2e7d32; } .b-mid { background: #ef6c00; } .b-low { background: #c62828; }
+    .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #555; margin: 8px 0 2px; }
+    .panels { display: flex; flex-wrap: wrap; gap: 10px; }
+    .panel { flex: 1 1 260px; min-width: 0; }
+    .quote { border: 1px solid #e3e3e3; background: #fafafa; border-radius: 4px; padding: 6px; max-height: 200px; overflow: auto; word-wrap: break-word; }
+    .diff { font-size: 12px; }
+    del { background: #fde0e0; color: #9b1c1c; text-decoration: line-through; }
+    ins { background: #def7de; color: #1b5e20; text-decoration: none; }
+    .state { margin: 10px 0 4px; font-weight: bold; }
+    .state.use { color: #2e7d32; } .state.skip { color: #999; }
+    .row { display: flex; gap: 8px; }
+    button { font: 13px Arial; padding: 7px 10px; border: 1px solid #bbb; background: #fff; border-radius: 5px; cursor: pointer; }
+    button:hover { background: #f0f0f0; }
+    button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+    button.use { background: #2e7d32; color: #fff; border-color: #2e7d32; }
+    button:disabled { opacity: .4; cursor: default; }
+    .nav { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+    .footer { border-top: 1px solid #eee; padding-top: 8px; margin-top: 6px; }
+    #status { font-size: 12px; margin-top: 6px; min-height: 16px; }
+    .full { width: 100%; }
+  </style>
+</head>
+<body>
+  <h2>QuoteFinder review</h2>
+  <div id="loading" class="muted">Scanning…</div>
+
+  <div id="app" style="display:none">
+    <div class="summary" id="summary"></div>
+
+    <div class="seg">
+      <button id="segChanges" class="on">Only changes</button>
+      <button id="segAll">All</button>
+    </div>
+
+    <div id="empty" style="display:none" class="muted"></div>
+
+    <div id="card" class="card" style="display:none">
+      <div><span id="pos" class="muted"></span> <span id="badge" class="badge"></span></div>
+      <div id="lineinfo" class="muted" style="margin-top:2px"></div>
+
+      <div class="panels">
+        <div class="panel">
+          <div class="lbl">Your quote (in this doc)</div>
+          <div id="oldhtml" class="quote"></div>
+        </div>
+        <div class="panel">
+          <div class="lbl">Manuscript now</div>
+          <div id="newhtml" class="quote"></div>
+        </div>
+      </div>
+
+      <div class="lbl">Changes (manuscript vs yours)</div>
+      <div id="diffhtml" class="quote diff"></div>
+
+      <div id="statelbl" class="state skip"></div>
+      <div class="row">
+        <button id="useBtn" class="use full">Use manuscript ✓</button>
+        <button id="skipBtn" class="full">Skip</button>
+      </div>
+      <div class="nav">
+        <button id="prev">◀ Prev</button>
+        <span id="counter" class="muted"></span>
+        <button id="next">Next ▶</button>
+      </div>
+    </div>
+
+    <div class="footer">
+      <button id="apply" class="primary full"></button>
+      <div id="status"></div>
+      <div class="row" style="margin-top:6px">
+        <button id="rescan" class="full">Rescan</button>
+        <button id="close" class="full">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    var MODE = '<?= mode ?>';
+    var DATA = null, items = [], view = 'changes', idx = 0, decisions = {};
+
+    function $(id) { return document.getElementById(id); }
+    function isChange(it) { return it.status !== 'exact' || it.startLine == null; } // shown in "Only changes"
+    function shown() { return view === 'all' ? items : items.filter(isChange); }
+    function canUse(it) { return it.status !== 'notfound' && it.status !== 'malformed' && it.startLine != null; }
+
+    function load() {
+      $('loading').style.display = 'block'; $('app').style.display = 'none';
+      google.script.run.withSuccessHandler(onData).withFailureHandler(onErr).buildReviewData(MODE);
+    }
+    function onErr(e) { $('loading').textContent = 'Error: ' + (e && e.message ? e.message : e); }
+
+    function onData(d) {
+      DATA = d; items = d.items || []; idx = 0; decisions = {};
+      // defaults: exact -> use (refresh); high-confidence fuzzy -> use; everything else -> skip
+      items.forEach(function (it) {
+        decisions[it.ordinal] = (canUse(it) && (it.status === 'exact' || it.similarity >= 90)) ? 'use' : 'skip';
+      });
+      $('loading').style.display = 'none'; $('app').style.display = 'block';
+      renderSummary(); renderView();
+    }
+
+    function renderSummary() {
+      var scopeTag = (DATA.scope === 'highlighted')
+        ? '<span class="badge" style="background:#6a1b9a">highlighted only</span> ' : '';
+      $('summary').innerHTML = scopeTag +
+        '<b>' + DATA.total + '</b> markers &middot; <b>' + DATA.exactCount + '</b> perfect &middot; <b>' +
+        DATA.imperfectCount + '</b> need review' +
+        (DATA.malformedCount ? ' &middot; <b style="color:#c62828">' + DATA.malformedCount + '</b> malformed' : '');
+      var ch = items.filter(isChange).length;
+      $('segChanges').textContent = 'Only changes (' + ch + ')';
+      $('segAll').textContent = 'All (' + items.length + ')';
+    }
+
+    function setView(v) {
+      view = v; idx = 0;
+      $('segChanges').className = (v === 'changes') ? 'on' : '';
+      $('segAll').className = (v === 'all') ? 'on' : '';
+      renderView();
+    }
+
+    function renderView() {
+      var list = shown();
+      if (!list.length) {
+        $('card').style.display = 'none'; $('empty').style.display = 'block';
+        $('empty').textContent = (DATA.scope === 'highlighted' && DATA.total === 0)
+          ? 'No highlighted @AUTOLINE markers found. Give the marker/quote text a highlight color, or turn off “Scan highlighted text only”.'
+          : (view === 'changes'
+              ? 'Nothing needs review — all ' + DATA.exactCount + ' match exactly. They’ll be refreshed when you click Apply.'
+              : 'No @AUTOLINE markers in scope.');
+      } else {
+        $('empty').style.display = 'none'; $('card').style.display = 'block';
+        render();
+      }
+      updateApply();
+    }
+
+    function countUse() { var k, c = 0; for (k in decisions) if (decisions[k] === 'use') c++; return c; }
+    function updateApply() {
+      $('apply').textContent = 'Apply  (' + countUse() + ' of ' + items.length + ' will change)';
+      $('apply').disabled = (countUse() === 0);
+    }
+
+    function render() {
+      var list = shown(), it = list[idx];
+      $('pos').textContent = (view === 'all' ? 'Item ' : 'Review ') + (idx + 1) + ' / ' + list.length;
+      var b = $('badge');
+      if (it.status === 'malformed') { b.textContent = 'malformed'; b.className = 'badge b-low'; }
+      else if (it.status === 'notfound') { b.textContent = 'no match'; b.className = 'badge b-low'; }
+      else if (it.status === 'exact') { b.textContent = 'exact'; b.className = 'badge b-good'; }
+      else { b.textContent = it.similarity + '% match'; b.className = 'badge ' + (it.similarity >= 85 ? 'b-good' : it.similarity >= 60 ? 'b-mid' : 'b-low'); }
+
+      $('lineinfo').textContent = it.status === 'malformed' ? ('⚠ ' + it.reason + ' — fix this marker in the document')
+        : it.startLine == null ? 'No usable line number found.'
+        : ('Manuscript line ' + (it.startLine === it.endLine ? it.startLine : it.startLine + '–' + it.endLine)
+           + '  (was ' + it.oldNum + ')');
+      $('oldhtml').innerHTML = it.oldHtml || '<em>(empty)</em>';
+      $('newhtml').innerHTML = it.newHtml || '<em class="muted">(none)</em>';
+      $('diffhtml').innerHTML = it.diffHtml || '<span class="muted">—</span>';
+
+      $('useBtn').disabled = !canUse(it);
+      $('useBtn').textContent = (it.status === 'exact') ? 'Update ✓' : 'Use manuscript ✓';
+      renderState(it);
+      $('counter').textContent = countUse() + ' selected';
+      $('prev').disabled = (idx === 0);
+      $('next').disabled = (idx === list.length - 1);
+    }
+
+    function renderState(it) {
+      var el = $('statelbl');
+      if (it.status === 'malformed') { el.textContent = '→ Flagged red in the doc — fix this marker manually'; el.className = 'state skip'; return; }
+      if (decisions[it.ordinal] === 'use') {
+        el.textContent = (it.status === 'exact') ? '→ Will refresh number & formatting'
+                                                 : '→ Will replace with manuscript text + number';
+        el.className = 'state use';
+      } else { el.textContent = '→ Will skip (left unchanged)'; el.className = 'state skip'; }
+    }
+
+    function decide(v) {
+      var it = shown()[idx];
+      decisions[it.ordinal] = (v && canUse(it)) ? 'use' : 'skip';
+      renderState(it); updateApply(); $('counter').textContent = countUse() + ' selected';
+      var list = shown();
+      if (idx < list.length - 1) { idx++; render(); }
+    }
+
+    function applyAll() {
+      $('status').textContent = 'Applying…'; $('apply').disabled = true;
+      google.script.run
+        .withSuccessHandler(function (msg) { $('status').textContent = msg; load(); })
+        .withFailureHandler(function (e) { $('status').textContent = 'Error: ' + (e && e.message ? e.message : e); updateApply(); })
+        .applyReviewDecisions(MODE, JSON.stringify(decisions));
+    }
+
+    $('segChanges').onclick = function () { setView('changes'); };
+    $('segAll').onclick = function () { setView('all'); };
+    $('useBtn').onclick = function () { decide(true); };
+    $('skipBtn').onclick = function () { decide(false); };
+    $('prev').onclick = function () { if (idx > 0) { idx--; render(); } };
+    $('next').onclick = function () { if (idx < shown().length - 1) { idx++; render(); } };
+    $('apply').onclick = applyAll;
+    $('rescan').onclick = load;
+    $('close').onclick = function () { google.script.host.close(); };
+
+    load();
+  </script>
+</body>
+</html>
