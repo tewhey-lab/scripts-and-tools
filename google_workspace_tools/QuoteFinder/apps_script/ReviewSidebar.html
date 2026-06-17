@@ -27,7 +27,10 @@
     button:hover { background: #f0f0f0; }
     button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
     button.use { background: #2e7d32; color: #fff; border-color: #2e7d32; }
+    button.now { background: #fff; color: #b06000; border-color: #e0a040; }
+    button.now:hover { background: #fff7e6; }
     button:disabled { opacity: .4; cursor: default; }
+    .controls { margin-bottom: 10px; }
     .nav { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
     .footer { border-top: 1px solid #eee; padding-top: 8px; margin-top: 6px; }
     #status { font-size: 12px; margin-top: 6px; min-height: 16px; }
@@ -42,7 +45,8 @@
     <div class="summary" id="summary"></div>
 
     <div class="seg">
-      <button id="segChanges" class="on">Only changes</button>
+      <button id="segChanges" class="on">Changes</button>
+      <button id="segLine">Line # only</button>
       <button id="segAll">All</button>
     </div>
 
@@ -52,9 +56,24 @@
       <div><span id="pos" class="muted"></span> <span id="badge" class="badge"></span></div>
       <div id="lineinfo" class="muted" style="margin-top:2px"></div>
 
+      <!-- Decision + navigation: kept ABOVE the variable-height quote text so they don't
+           shift when a long quote grows the card. -->
+      <div class="controls">
+        <div id="statelbl" class="state skip"></div>
+        <div class="row">
+          <button id="useBtn" class="use full">Use manuscript ✓</button>
+          <button id="skipBtn" class="full">Skip</button>
+        </div>
+        <div class="nav">
+          <button id="prev">◀ Prev</button>
+          <span id="counter" class="muted"></span>
+          <button id="next">Next ▶</button>
+        </div>
+      </div>
+
       <div class="panels">
         <div class="panel">
-          <div class="lbl">Your quote (in this doc)</div>
+          <div class="lbl" id="oldlbl">Your quote (in this doc)</div>
           <div id="oldhtml" class="quote"></div>
         </div>
         <div class="panel">
@@ -66,23 +85,17 @@
       <div class="lbl">Changes (manuscript vs yours)</div>
       <div id="diffhtml" class="quote diff"></div>
 
-      <div id="statelbl" class="state skip"></div>
-      <div class="row">
-        <button id="useBtn" class="use full">Use manuscript ✓</button>
-        <button id="skipBtn" class="full">Skip</button>
-      </div>
-      <div class="nav">
-        <button id="prev">◀ Prev</button>
-        <span id="counter" class="muted"></span>
-        <button id="next">Next ▶</button>
+      <div class="row" style="margin-top:10px">
+        <button id="applyOneBtn" class="now full">⚡ Apply this one now ✓</button>
       </div>
     </div>
 
     <div class="footer">
       <button id="apply" class="primary full"></button>
       <div id="status"></div>
-      <div class="row" style="margin-top:6px">
-        <button id="rescan" class="full">Rescan</button>
+      <div class="muted" style="font-size:11px;margin:6px 0 4px">Edited the doc? Click ↻ Rescan to re-read. To change which lines are in scope, <b>reopen</b> the panel with a different selection (Rescan keeps the selection you opened with).</div>
+      <div class="row">
+        <button id="rescan" class="full">↻ Rescan</button>
         <button id="close" class="full">Close</button>
       </div>
     </div>
@@ -90,44 +103,77 @@
 
   <script>
     var MODE = '<?= mode ?>';
-    var DATA = null, items = [], view = 'changes', idx = 0, decisions = {};
+    var DATA = null, items = [], view = 'changes', idx = 0, decisions = {}, applied = {};
+    var busy = false;
 
     function $(id) { return document.getElementById(id); }
-    function isChange(it) { return it.status !== 'exact' || it.startLine == null; } // shown in "Only changes"
-    function shown() { return view === 'all' ? items : items.filter(isChange); }
+    // "Changes": anything that will change on apply — text differs, OR the line number is moving/uncertain.
+    function isChange(it) { return it.status !== 'exact' || it.startLine == null || it.lineEstimated || it.numberChanged; }
+    // "Line # only": a strict subset — exact-text matches whose ONLY change is the line number.
+    function isLineOnly(it) { return it.status === 'exact' && it.startLine != null && (it.numberChanged || it.lineEstimated); }
+    function shown() {
+      if (view === 'all') return items;
+      if (view === 'line') return items.filter(isLineOnly);
+      return items.filter(isChange);               // 'changes'
+    }
     function canUse(it) { return it.status !== 'notfound' && it.status !== 'malformed' && it.startLine != null; }
 
     function load() {
+      if (busy) return;
+      busy = true;
       $('loading').style.display = 'block'; $('app').style.display = 'none';
+      $('loading').textContent = 'Scanning…';
       google.script.run.withSuccessHandler(onData).withFailureHandler(onErr).buildReviewData(MODE);
     }
-    function onErr(e) { $('loading').textContent = 'Error: ' + (e && e.message ? e.message : e); }
+    function onErr(e) { busy = false; $('loading').style.display = 'block'; $('loading').textContent = 'Error: ' + (e && e.message ? e.message : e); }
 
     function onData(d) {
-      DATA = d; items = d.items || []; idx = 0; decisions = {};
-      // defaults: exact -> use (refresh); high-confidence fuzzy -> use; everything else -> skip
+      busy = false;
+      var prev = decisions || {};                 // keep Use/Skip choices you've already made
+      DATA = d; items = d.items || []; idx = 0; decisions = {}; applied = {};  // fresh scan -> applied state resets
       items.forEach(function (it) {
-        decisions[it.ordinal] = (canUse(it) && (it.status === 'exact' || it.similarity >= 90)) ? 'use' : 'skip';
+        decisions[it.ordinal] = prev.hasOwnProperty(it.ordinal) ? prev[it.ordinal]
+          // defaults: exact -> use (refresh); high-confidence fuzzy -> use; else skip
+          : ((canUse(it) && (it.status === 'exact' || it.similarity >= 90)) ? 'use' : 'skip');
       });
       $('loading').style.display = 'none'; $('app').style.display = 'block';
       renderSummary(); renderView();
     }
 
     function renderSummary() {
-      var scopeTag = (DATA.scope === 'highlighted')
-        ? '<span class="badge" style="background:#6a1b9a">highlighted only</span> ' : '';
+      var scopeTag = DATA.scope === 'selection'
+        ? '<span class="badge" style="background:#1565c0">selection: ' + DATA.selectionCount + ' quote(s)</span> ' : '';
       $('summary').innerHTML = scopeTag +
         '<b>' + DATA.total + '</b> markers &middot; <b>' + DATA.exactCount + '</b> perfect &middot; <b>' +
         DATA.imperfectCount + '</b> need review' +
-        (DATA.malformedCount ? ' &middot; <b style="color:#c62828">' + DATA.malformedCount + '</b> malformed' : '');
+        (DATA.malformedCount ? ' &middot; <b style="color:#c62828">' + DATA.malformedCount + '</b> malformed' : '') +
+        diagLine();
       var ch = items.filter(isChange).length;
-      $('segChanges').textContent = 'Only changes (' + ch + ')';
+      var ln = items.filter(isLineOnly).length;
+      $('segChanges').textContent = 'Changes (' + ch + ')';
+      $('segLine').textContent = 'Line # only (' + ln + ')';
       $('segAll').textContent = 'All (' + items.length + ')';
+    }
+
+    // Shows exactly what the server saw on this scan — so a wrong result is diagnosable.
+    function diagLine() {
+      var s = '<div class="muted" style="font-size:11px;margin-top:4px;line-height:1.5">';
+      if (DATA.scope === 'selection') {
+        s += 'Server read: <b>' + DATA.allMarkers + '</b> markers in the doc; <b>' + DATA.total +
+             '</b> in scope from your selection (' + DATA.selectionCount + ' distinct quote(s) selected when you opened this panel).' +
+             (DATA.total !== DATA.selectionCount ? ' <span class="muted">(these differ when a selected quote also appears elsewhere — identical quotes are matched by text — or a selection touched a header/footer)</span>' : '') +
+             '<br>To change scope, <b>reopen</b> the panel with a different selection — Rescan keeps the same selection.';
+      } else {
+        s += 'Server read: <b>' + DATA.allMarkers + '</b> markers (whole document). ' +
+             'To work on a subset, drag-select the quote line(s) and reopen the panel.';
+      }
+      return s + '</div>';
     }
 
     function setView(v) {
       view = v; idx = 0;
       $('segChanges').className = (v === 'changes') ? 'on' : '';
+      $('segLine').className = (v === 'line') ? 'on' : '';
       $('segAll').className = (v === 'all') ? 'on' : '';
       renderView();
     }
@@ -136,11 +182,13 @@
       var list = shown();
       if (!list.length) {
         $('card').style.display = 'none'; $('empty').style.display = 'block';
-        $('empty').textContent = (DATA.scope === 'highlighted' && DATA.total === 0)
-          ? 'No highlighted @AUTOLINE markers found. Give the marker/quote text a highlight color, or turn off “Scan highlighted text only”.'
+        $('empty').textContent = (DATA.scope === 'selection' && DATA.total === 0)
+          ? 'No @AUTOLINE markers were inside your selection. Reopen the panel with the quote line(s) selected.'
           : (view === 'changes'
-              ? 'Nothing needs review — all ' + DATA.exactCount + ' match exactly. They’ll be refreshed when you click Apply.'
-              : 'No @AUTOLINE markers in scope.');
+              ? 'Nothing needs review — all ' + DATA.exactCount + ' match exactly and no line numbers move. They’ll be refreshed when you click Apply.'
+              : view === 'line'
+                ? 'No line-number-only changes — every exact match already has the right number. Check the Changes tab for text edits.'
+                : 'No @AUTOLINE markers in scope.');
       } else {
         $('empty').style.display = 'none'; $('card').style.display = 'block';
         render();
@@ -160,19 +208,28 @@
       var b = $('badge');
       if (it.status === 'malformed') { b.textContent = 'malformed'; b.className = 'badge b-low'; }
       else if (it.status === 'notfound') { b.textContent = 'no match'; b.className = 'badge b-low'; }
-      else if (it.status === 'exact') { b.textContent = 'exact'; b.className = 'badge b-good'; }
-      else { b.textContent = it.similarity + '% match'; b.className = 'badge ' + (it.similarity >= 85 ? 'b-good' : it.similarity >= 60 ? 'b-mid' : 'b-low'); }
+      else if (it.status === 'exact') {
+        if (it.lineEstimated) { b.textContent = 'estimated'; b.className = 'badge b-mid'; }
+        else { b.textContent = 'exact'; b.className = 'badge b-good'; }
+      }
+      else { b.textContent = it.similarity + '% match' + (it.lineEstimated ? ' · est' : ''); b.className = 'badge ' + (it.similarity >= 85 ? 'b-good' : it.similarity >= 60 ? 'b-mid' : 'b-low'); }
 
       $('lineinfo').textContent = it.status === 'malformed' ? ('⚠ ' + it.reason + ' — fix this marker in the document')
         : it.startLine == null ? 'No usable line number found.'
         : ('Manuscript line ' + (it.startLine === it.endLine ? it.startLine : it.startLine + '–' + it.endLine)
-           + '  (was ' + it.oldNum + ')');
+           + '  (was ' + it.oldNum + ')'
+           + (it.lineEstimated ? ' — estimated (PDF couldn’t pin it; gDoc layout used)' : ''));
+      $('oldlbl').textContent = it.status === 'malformed' ? 'Marker in this doc (hook + next 20 chars)' : 'Your quote (in this doc)';
       $('oldhtml').innerHTML = it.oldHtml || '<em>(empty)</em>';
       $('newhtml').innerHTML = it.newHtml || '<em class="muted">(none)</em>';
       $('diffhtml').innerHTML = it.diffHtml || '<span class="muted">—</span>';
 
-      $('useBtn').disabled = !canUse(it);
+      var done = !!applied[it.ordinal];
+      $('useBtn').disabled = !canUse(it) || done;
       $('useBtn').textContent = (it.status === 'exact') ? 'Update ✓' : 'Use manuscript ✓';
+      $('skipBtn').disabled = done;
+      $('applyOneBtn').disabled = !canUse(it) || done;
+      $('applyOneBtn').textContent = done ? '✓ Applied' : '⚡ Apply this one now ✓';
       renderState(it);
       $('counter').textContent = countUse() + ' selected';
       $('prev').disabled = (idx === 0);
@@ -181,6 +238,11 @@
 
     function renderState(it) {
       var el = $('statelbl');
+      if (applied[it.ordinal]) {
+        var a = applied[it.ordinal];
+        el.textContent = '✓ Applied to the doc — line ' + (a.startLine === a.endLine ? a.startLine : a.startLine + '–' + a.endLine);
+        el.className = 'state use'; return;
+      }
       if (it.status === 'malformed') { el.textContent = '→ Flagged red in the doc — fix this marker manually'; el.className = 'state skip'; return; }
       if (decisions[it.ordinal] === 'use') {
         el.textContent = (it.status === 'exact') ? '→ Will refresh number & formatting'
@@ -191,10 +253,32 @@
 
     function decide(v) {
       var it = shown()[idx];
+      if (applied[it.ordinal]) return;            // already committed; nothing to record
       decisions[it.ordinal] = (v && canUse(it)) ? 'use' : 'skip';
       renderState(it); updateApply(); $('counter').textContent = countUse() + ' selected';
       var list = shown();
       if (idx < list.length - 1) { idx++; render(); }
+    }
+
+    // Commit just this marker, re-located fresh on the server by its ordinal.
+    function applyOneNow() {
+      var it = shown()[idx];
+      if (!canUse(it) || applied[it.ordinal]) return;
+      $('applyOneBtn').disabled = true; $('useBtn').disabled = true; $('skipBtn').disabled = true;
+      $('status').textContent = 'Applying this one… (reading the manuscript, a few seconds)';
+      google.script.run
+        .withSuccessHandler(function (res) {
+          if (res && res.ok) {
+            applied[it.ordinal] = res;
+            decisions[it.ordinal] = 'skip';       // already done — keep the bulk Apply from redoing it
+            $('status').textContent = '✓ ' + res.msg;
+          } else {
+            $('status').textContent = '⚠ ' + ((res && res.msg) || 'Could not apply this one.');
+          }
+          render(); updateApply();
+        })
+        .withFailureHandler(function (e) { $('status').textContent = 'Error: ' + (e && e.message ? e.message : e); render(); })
+        .applyOne(MODE, it.ordinal);
     }
 
     function applyAll() {
@@ -206,9 +290,11 @@
     }
 
     $('segChanges').onclick = function () { setView('changes'); };
+    $('segLine').onclick = function () { setView('line'); };
     $('segAll').onclick = function () { setView('all'); };
     $('useBtn').onclick = function () { decide(true); };
     $('skipBtn').onclick = function () { decide(false); };
+    $('applyOneBtn').onclick = applyOneNow;
     $('prev').onclick = function () { if (idx > 0) { idx--; render(); } };
     $('next').onclick = function () { if (idx < shown().length - 1) { idx++; render(); } };
     $('apply').onclick = applyAll;

@@ -50,6 +50,17 @@ can; **Preview matches** shows what either engine would write before you commit.
 5. **QuoteFinder → Settings…** → paste the manuscript doc's URL or ID (and, for the
    exact engine, the PDF/JSON line-number file). Save.
 6. First run will show a Google authorization prompt (it reads the manuscript and edits this doc). Approve it.
+7. *(Optional)* Only needed for the marker-style option **“Use the document’s Normal text style”**
+   (Settings → *Marker text style*). The default style mode is a fixed **set style**
+   (Arial 11 #000000, regular), which needs nothing extra. To use the Normal-text option, enable
+   the **Google Docs API** advanced service: in the Apps Script editor, next to **Services** click
+   **＋**, pick **Google Docs API**, identifier **`Docs`**, **Add**. This **Add** action only
+   appends the service — it's the safe path. The repo's
+   [`apps_script/appsscript.json`](apps_script/appsscript.json) shows the exact entry
+   (`enabledAdvancedServices` → `Docs`/`docs`/`v1`); add just that block if you edit the manifest
+   by hand — **don't paste the whole file over an existing manifest**, since the manifest is
+   replaced wholesale and you'd wipe your `timeZone`, `oauthScopes`, and any other settings. Then
+   re-run once to approve the added permission.
 
 The **QuoteFinder** menu:
 - **Update references (all at once)** ▸ gDoc (Estimated Line #) / PDF/JSON (Exact Line #) — fire-and-forget; flags imperfect ones in the doc.
@@ -63,10 +74,11 @@ The **QuoteFinder** menu:
 **QuoteFinder → Update references (all at once) → gDoc (Estimated Line #).**
 
 - Updated markers get their new numbers.
-- **Yellow** highlight = low‑confidence number (a table/image/unsupported font sits
+- **Yellow flag** = low‑confidence number (a table/image/unsupported font sits
   somewhere above it, so the absolute count may be off — check these against the
-  manuscript). **Red** = quote not found (typo or edited wording).
-- Re‑run any time. **Clear all QuoteFinder highlights** removes the marks.
+  manuscript). **Red flag** = quote not found (typo or edited wording). These are
+  background shades the tool paints to mark results — not scope input.
+- Re‑run any time. **Clear all QuoteFinder flags** removes the marks.
 
 > This engine reproduces Google's wrapping using standard Arial/Times metrics.
 > For plain single‑column manuscript text it is typically exact; it is *not*
@@ -99,6 +111,15 @@ Do this whenever the manuscript changes:
    (Only needed once unless you rename it.)
 5. **QuoteFinder → Update references (all at once) → PDF/JSON (Exact Line #).**
 
+> **How matching works (robust by design):** the gDoc layout gives a *ballpark* line
+> number; the PDF then **fine‑tunes** it. For each quote the tool searches the PDF
+> text near that ballpark — exact first, then a **fuzzy** match within a window — so
+> small PDF‑extraction quirks (e.g. `ﬁ` ligatures, superscript spacing) don't break
+> it. If the PDF genuinely can't pin a quote, it **falls back to the gDoc estimate**
+> and flags it **yellow / "estimated"** (so a quote found in the doc never comes back
+> as "no usable line number" — it just may be flagged for a manual check). Tunable via
+> `PDF_WINDOW` and `PDF_FUZZY_MIN` in `Code.gs`.
+
 ---
 
 ## Reviewing matches (the review panel)
@@ -110,8 +131,14 @@ case-by-case: **QuoteFinder → Review & update (step through imperfect) ▸ gDo
 opens that **floats over the doc but doesn't block it** — you can still scroll and
 edit while it's open.
 
-- A **view toggle** at the top: **Only changes** (default — fuzzy / not-found
-  markers) or **All** (also lists the perfect matches so you can eyeball/veto them).
+- Three **category tabs** at the top: **Changes** (default — anything that will change
+  on apply: edited/typo'd text, not-found/malformed markers, **and** exact matches whose
+  line number is moving), **Line # only** (a subset — exact-text matches whose *only*
+  change is the line number, incl. low-confidence "estimated" lines), and **All** (every
+  marker in scope, including the no-op perfect ones). The tabs only filter what you step
+  through; they never change what **Apply** does.
+- The **decision and navigation buttons sit above the quote text** (Use manuscript / Skip,
+  and ◀ Prev / Next ▶), so they stay put even when a long quote grows the card.
 - Each card shows a **match %** badge, the manuscript line(s) the candidate sits on,
   **your current quote** and **the manuscript text now** *side by side, with their
   real formatting* (color, bold, italic, super/subscript), and a **word-level diff**.
@@ -120,15 +147,22 @@ edit while it's open.
   everything else → skip. Use **◀ / ▶** to move and revisit.
 - **Apply** commits everything in one pass — "*N of M will change*" — then rescans
   so anything you skipped is still there. Nothing is written until you click Apply.
+- **⚡ Apply this one now ✓** commits *just the current card* immediately and shows
+  "✓ Applied — line N." It re-finds the marker fresh on the server (by its order in
+  the doc), so committing one **can't** shift the positions of the others. Note it
+  re-reads the manuscript each time, so it costs about as much as a full Apply — use
+  it to land one or two and watch them; use **Apply** for doing many at once.
 - Items with **no match found** can only be skipped (there's nothing to pull in).
+
+**Re-reading:** the panel scans when it opens. Edited the doc? Click **↻ Rescan** to
+re-read (your Use/Skip picks are kept). To change which lines are **in scope**, reopen
+the panel with a different drag-selection — Rescan keeps the selection you opened with
+(see *Scanning a selection* below).
 
 > **Width / docked vs floating:** the panel is a wide floating dialog by default
 > (`REVIEW_WIDTH` ≈ 820 px in `Code.gs`). Set `REVIEW_PANEL: 'sidebar'` to use the
 > classic docked sidebar instead — but note Google **locks sidebars to ~300 px**,
 > so that can't be widened.
->
-> Avoid hand-editing the markers while the panel is open — click **Rescan** if you
-> do, so its positions stay in sync.
 
 ---
 
@@ -143,26 +177,25 @@ here — that's what **Review & update** is for.)
 
 ---
 
-## Scanning only highlighted markers
+## Scanning a subset — select the lines
 
-To work on just a subset, use the **scope toggle** in the QuoteFinder menu. It
-always names the current mode and updates immediately (no reload):
-- **○ Scope: WHOLE document — click to scan highlighted text only**
-- **◉ Scope: HIGHLIGHTED text only — click to scan the whole document**
+To process only some quotes, **drag-select the quote line(s)** and run a command — the
+selection *is* the scope. **No toggle, no highlighting.** Nothing selected → the whole
+document. Selection is your live cursor selection, so it's read instantly (no save‑lag).
 
-With highlighted scope on, **every** command — Update, Review, Preview — ignores any
-`@AUTOLINE` marker unless its marker/quote text has a **highlight (background) color**.
-
-- Highlight the marker or its quote with the highlighter tool (any color). Scattered
-  markers are fine — it's not a single drag-selection, and it persists across runs.
-- The tool's own yellow/red flag shades don't count as "highlighted," so prior runs
-  won't accidentally widen the scope.
-- In this mode the tool **won't add or clear background colors**, so your highlights
-  are left intact (results are reported in the summary / sidebar instead).
-- Turn it off to go back to the whole document.
-
-> "Highlighted" here means a **highlight color**, not the blue drag-selection. Ask
-> if you'd prefer it to use the current selection instead.
+- **Update references** / **Preview matches** read your **live selection** at run time.
+  The report says e.g. *"Scope: 6 selected quote(s)."* Nothing selected → whole doc.
+- **Review & update** can't read a live selection (it's a floating dialog), so it
+  **captures your selection when you open the panel** and uses it for the whole
+  session (scan, Rescan, Apply). To change the subset, **reopen** the panel with a
+  different selection. The panel shows a blue **"selection: N quote(s)"** badge.
+- It's **coarse by line**: selecting any part of a line includes that line's marker.
+- **Identical quotes are matched by text.** If the same quote appears on two lines and
+  you select one, *both* are processed (they'd get the same line number anyway). The
+  reports show the in-scope count vs the distinct-selected count so this is visible,
+  never silent. (Likewise, several bare/unfinished `@AUTOLINE` hooks can group together.)
+- A selection that contains **no markers** processes **nothing** (and says so) — it
+  does *not* fall back to the whole document.
 
 ## Marker format (configurable)
 
@@ -194,9 +227,12 @@ So there are two windows: a small one (`OPEN_LOOKAHEAD`) to find where the quote
 
 Notes:
 - Matching ignores case and collapses whitespace; en/em dashes are normalized.
-- The quote text is left exactly as you wrote it (only its formatting is updated).
-  The marker is rewritten as **`<HOOK><start>: `** or **`<HOOK><start>-<end>: `** (the
-  found line number(s), colon, **one space**) regardless of what was there before.
+- On **auto Update** and **Preview** the quote text is left exactly as you wrote it
+  (only its formatting and the line number are updated). Only **Review** can change the
+  text, and only when you pick **“Use manuscript”** on a fuzzy match — then the body is
+  replaced with the manuscript wording (see *Reviewing matches* and *Split quotes*).
+  The marker itself is rewritten as **`<HOOK><start>: `** or **`<HOOK><start>-<end>: `**
+  (the found line number(s), colon, **one space**) regardless of what was there before.
 - A hook with **no quote within `OPEN_LOOKAHEAD`** is flagged as malformed (red), so
   you can spot it.
 
@@ -212,23 +248,40 @@ runs from the **start of the first piece to the end of the last piece**.
    →  @AUTOLINE12-18: "the cells were treated [...] and then imaged"
 ```
 
-Your elided text is kept as-is (it is **never** replaced by the manuscript text);
-formatting is copied piece-by-piece. Works in auto, preview, and review.
+On **auto Update** and **Preview**, your text (every piece *and* the `[...]`
+separators) is kept exactly as written — only the line number and per-piece formatting
+are updated.
+
+In **Review**, picking **“Use manuscript”** on a fuzzy split quote rewrites only the
+pieces that *differ* from the manuscript to the manuscript wording (e.g. dropping a stray
+trailing period), while **exact pieces, the `[...]` separators, and the spacing around
+each piece are preserved**. An all-exact split quote is left untouched. If a corrected
+piece's manuscript text happens to contain its own `[...]` or a closing quote mark, that
+piece is kept as-you-wrote-it instead (splicing it in would break the marker on the next
+scan). One small caveat: any character formatting you applied *to the `[...]` separators
+themselves* is not preserved across the rewrite (the separators keep their text, not their
+styling); the pieces' own formatting is copied piece-by-piece as before.
 
 ### Malformed markers (flagged)
 
 If a hook + number + colon is found but the quote is **missing**, **unterminated**
 (no closing mark within `MAX_LOOKAHEAD`), or **empty**, the marker can't be matched.
-QuoteFinder flags it instead of silently ignoring it:
-- **Auto** runs **highlight the hook red** (like a not-found quote) and report a count.
-- **Review** lists it with a red **“malformed”** badge and the reason; it can only be
+QuoteFinder flags it instead of silently ignoring it, and **shows the hook plus the
+~20 characters that follow it** so you can find the broken marker (and the passage it
+was pointing at) in the document:
+- **Auto** runs **highlight the hook red** (like a not-found quote) and the report
+  lists each one as `MALFORMED (reason): @AUTOLINE… <next 20 chars> …`.
+- **Review** lists it with a red **“malformed”** badge and the reason, and shows
+  `@AUTOLINE` + the next 20 characters under *“Marker in this doc.”* It can only be
   skipped (and its hook is highlighted red on Apply). Fix the marker in the document.
+- **Preview matches** shows the same hook + 20 characters in its first column.
 
 ## Settings
 
-The document IDs and the marker-format keys (`HOOK`, `QUOTE_OPEN`, `QUOTE_CLOSE`,
-`OPEN_LOOKAHEAD`, `MAX_LOOKAHEAD`) are editable from **QuoteFinder → Settings…** (saved
-per document; an empty field reverts to the default). The rest are defaults at the top of `Code.gs`:
+The document IDs, the marker-format keys (`HOOK`, `QUOTE_OPEN`, `QUOTE_CLOSE`,
+`OPEN_LOOKAHEAD`, `MAX_LOOKAHEAD`), and the **marker text style** (below) are editable
+from **QuoteFinder → Settings…** (saved per document; an empty field reverts to the
+default). The rest are defaults at the top of `Code.gs`:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -239,7 +292,11 @@ per document; an empty field reverts to the default). The rest are defaults at t
 | `COPY_FORMATTING` | `true` | copy color/bold/italic/super‑sub onto the quote |
 | `ALWAYS_RANGE` | `false` | `true` → always emit `a-b` even for one line |
 | `CASE_INSENSITIVE` | `true` | match quotes ignoring case |
-| `HIGHLIGHTED_ONLY` | `false` | scan only highlighted markers (use the menu toggle, not this) |
+| `MARKER_STYLE_MODE` | `'set'` | how the marker scaffold (hook + line # + colon + quote marks — **not** the quote) is styled when updating: `'insert'` = keep the formatting where it sits (no restyling), `'named'` = the document-wide *Normal text* style (needs the Docs API — see Install step 7), `'set'` = the explicit values below. Pick it with the radio buttons in Settings → *Marker text style* |
+| `MARKER_FONT_FAMILY` / `MARKER_FONT_SIZE` / `MARKER_FONT_COLOR` | `'Arial'` / `11` / `'#000000'` | the **set** style's font/size/color (blank fields fall back to these defaults) |
+| `MARKER_BOLD` / `MARKER_ITALIC` | `false` / `false` | the **set** style's weight (default is regular) |
+| `PDF_WINDOW` | `40` | PDF/JSON engine: rendered lines to search each side of the gDoc estimate |
+| `PDF_FUZZY_MIN` | `0.5` | PDF/JSON engine: min word-similarity to accept a fuzzy PDF refinement |
 | `REVIEW_PANEL` | `'dialog'` | review UI: `'dialog'` (wide, floating, draggable) or `'sidebar'` (docked, ~300 px) |
 | `REVIEW_WIDTH` / `REVIEW_HEIGHT` | `820` / `780` | review dialog size in px (dialog mode only) |
 

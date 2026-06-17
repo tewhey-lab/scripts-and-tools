@@ -51,12 +51,24 @@ var CONFIG = {
   COPY_FORMATTING: true,                       // copy color/bold/italic/super-sub
   ALWAYS_RANGE: false,                         // true => always write <hook>a-b
   CASE_INSENSITIVE: true,                      // match quotes ignoring case
-  HIGHLIGHTED_ONLY: false,                     // scan only markers in highlighted text
+  PDF_WINDOW: 40,                              // exact engine: rendered lines to search each side of the gDoc estimate
+  PDF_FUZZY_MIN: 0.5,                          // exact engine: min word-similarity to accept a fuzzy PDF refinement
   REVIEW_PANEL: 'dialog',                      // 'dialog' (wide, floating, non-blocking) or 'sidebar' (narrow, docked)
   REVIEW_WIDTH: 820,                           // review dialog width in px  (ignored for sidebar)
   REVIEW_HEIGHT: 780,                          // review dialog height in px (ignored for sidebar)
   LOWCONF_COLOR: '#fff2cc',                    // highlight: low-confidence number
-  NOTFOUND_COLOR: '#f4cccc'                    // highlight: quote not found
+  NOTFOUND_COLOR: '#f4cccc',                   // highlight: quote not found
+  // Marker scaffold style — the hook + line number(s) + colon + quotation marks (NOT the
+  // quoted text). Choose how it's styled when a marker is updated (set in Settings):
+  //   'insert' = keep the formatting where it sits (no restyling — the original behavior)
+  //   'named'  = the document-wide "Normal text" style (needs the Docs API advanced service)
+  //   'set'    = the explicit font/size/color/weight below (the default)
+  MARKER_STYLE_MODE: 'set',                    // 'insert' | 'named' | 'set'
+  MARKER_FONT_FAMILY: 'Arial',                 // 'set' mode font (blank => Arial)
+  MARKER_FONT_SIZE: 11,                        // 'set' mode size (0/blank => 11)
+  MARKER_FONT_COLOR: '#000000',                // 'set' mode color (blank => #000000)
+  MARKER_BOLD: false,                          // 'set' mode: bold
+  MARKER_ITALIC: false                         // 'set' mode: italic
 };
 
 // ----------------------------------------------------------------------------
@@ -64,15 +76,10 @@ var CONFIG = {
 // ----------------------------------------------------------------------------
 function onOpen() { buildMenu_(); }
 
-// Builds (and rebuilds) the QuoteFinder menu. Called on open AND after toggling
-// the scan scope, so the scope label reflects the current mode without a reload.
+// Builds the QuoteFinder menu. To scope to a subset, drag-select the quote line(s)
+// and run a command — selection is the scope (no menu toggle needed).
 function buildMenu_() {
   var ui = DocumentApp.getUi();
-  var hl = false;
-  try { hl = (PropertiesService.getDocumentProperties().getProperty('HIGHLIGHTED_ONLY') === 'true'); } catch (e) {}
-  var scopeLabel = hl
-    ? '◉ Scope: HIGHLIGHTED text only — click to scan the whole document'
-    : '○ Scope: WHOLE document — click to scan highlighted text only';
   var update = ui.createMenu('Update references (all at once)')
     .addItem('gDoc (Estimated Line #)', 'runSimulation')
     .addItem('PDF/JSON (Exact Line #)', 'runExact');
@@ -85,19 +92,9 @@ function buildMenu_() {
     .addSeparator()
     .addItem('Preview matches (dry run, no changes)', 'previewMatches')
     .addSeparator()
-    .addItem(scopeLabel, 'toggleHighlightScope')
     .addItem('Settings…', 'showSettings')
-    .addItem('Clear all QuoteFinder highlights', 'clearHighlights')
+    .addItem('Clear all QuoteFinder flags', 'clearHighlights')
     .addToUi();
-}
-
-// Toggle the "scan highlighted text only" scope (persisted per document).
-function toggleHighlightScope() {
-  var p = PropertiesService.getDocumentProperties();
-  var now = (p.getProperty('HIGHLIGHTED_ONLY') === 'true');
-  p.setProperty('HIGHLIGHTED_ONLY', now ? 'false' : 'true');
-  buildMenu_();   // refresh the menu label immediately — no document reload needed
-  DocumentApp.getUi().alert('Scan scope is now: ' + (now ? 'THE WHOLE DOCUMENT' : 'HIGHLIGHTED TEXT ONLY') + '.');
 }
 
 function openReviewSim()   { openReview_('sim'); }
@@ -105,6 +102,10 @@ function openReviewExact() { openReview_('exact'); }
 function openReview_(mode) {
   var c = cfg();
   if (!c.PRIMARY_DOC_ID) { DocumentApp.getUi().alert('Set the primary doc first (QuoteFinder → Settings…).'); return; }
+  // This is the last code that runs with the live selection still available, so snapshot
+  // it here for the whole panel session (the modeless dialog can't read getSelection()).
+  // No selection -> writes null, which CLEARS any stale snapshot.
+  writeSelectionSnapshot_(selectionSigSet_(c));
   var title = 'QuoteFinder review — ' + (mode === 'sim' ? 'gDoc (Estimated Line #)' : 'PDF/JSON (Exact Line #)');
   var t = HtmlService.createTemplateFromFile('ReviewSidebar');
   t.mode = mode;
@@ -116,13 +117,19 @@ function openReview_(mode) {
   else ui.showModelessDialog(html.setWidth(c.REVIEW_WIDTH).setHeight(c.REVIEW_HEIGHT), title);
 }
 
+// Normalize a color to '#rrggbb' (strip '#', lowercase, expand 3-digit hex); '' if not a valid hex.
+function normHexColor_(s) {
+  s = String(s == null ? '' : s).trim().toLowerCase().replace(/^#/, '');
+  if (/^[0-9a-f]{3}$/.test(s)) s = s.charAt(0) + s.charAt(0) + s.charAt(1) + s.charAt(1) + s.charAt(2) + s.charAt(2);
+  return /^[0-9a-f]{6}$/.test(s) ? ('#' + s) : '';
+}
+
 function cfg() {
   var p = PropertiesService.getDocumentProperties();
   var c = JSON.parse(JSON.stringify(CONFIG));
   c.PRIMARY_DOC_ID      = p.getProperty('PRIMARY_DOC_ID')      || c.PRIMARY_DOC_ID;
   c.EXACT_MAP_FILE_NAME = p.getProperty('EXACT_MAP_FILE_NAME') || c.EXACT_MAP_FILE_NAME;
   c.EXACT_MAP_FILE_ID   = p.getProperty('EXACT_MAP_FILE_ID')   || c.EXACT_MAP_FILE_ID;
-  c.HIGHLIGHTED_ONLY    = (p.getProperty('HIGHLIGHTED_ONLY') === 'true');
   // marker format — editable via the "Settings…" dialog (falls back to CONFIG)
   var s;
   s = p.getProperty('HOOK');           if (s) c.HOOK = s;
@@ -130,6 +137,13 @@ function cfg() {
   s = p.getProperty('QUOTE_CLOSE');    if (s) c.QUOTE_CLOSE = s;
   s = p.getProperty('OPEN_LOOKAHEAD'); if (s != null && s !== '' && !isNaN(parseInt(s, 10))) c.OPEN_LOOKAHEAD = parseInt(s, 10);
   s = p.getProperty('MAX_LOOKAHEAD');  if (s != null && s !== '' && !isNaN(parseInt(s, 10))) c.MAX_LOOKAHEAD = parseInt(s, 10);
+  // marker scaffold style
+  s = p.getProperty('MARKER_STYLE_MODE'); if (s === 'insert' || s === 'named' || s === 'set') c.MARKER_STYLE_MODE = s;
+  s = p.getProperty('MARKER_FONT_FAMILY'); if (s != null) c.MARKER_FONT_FAMILY = s;
+  s = p.getProperty('MARKER_FONT_SIZE');  if (s != null && s !== '' && !isNaN(parseFloat(s))) c.MARKER_FONT_SIZE = parseFloat(s);
+  s = p.getProperty('MARKER_FONT_COLOR'); if (s != null) { var nc = normHexColor_(s); if (nc) c.MARKER_FONT_COLOR = nc; }   // ignore a legacy/non-hex value -> keep the default
+  s = p.getProperty('MARKER_BOLD');   if (s != null && s !== '') c.MARKER_BOLD = (s === 'true');
+  s = p.getProperty('MARKER_ITALIC'); if (s != null && s !== '') c.MARKER_ITALIC = (s === 'true');
   return c;
 }
 
@@ -138,6 +152,23 @@ function showSettings() {
   var c = cfg();
   function a(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
   var emf = c.EXACT_MAP_FILE_ID || c.EXACT_MAP_FILE_NAME || '';
+  // For the "Use the document's Normal text style" option: what the Docs API reports, and whether
+  // the advanced service is even enabled (so we can tell the user if that option won't work yet).
+  var named = namedNormalStyle_();
+  var namedDesc;
+  if (!docsApiAvailable_()) {
+    namedDesc = '<span style="color:#b00">Google Docs API not enabled</span> — turn it on (Install step 7) or this option won’t restyle.';
+  } else if (named.family === '' && named.size === '' && named.color === '') {
+    namedDesc = 'Docs API on, but the Normal text style couldn’t be read.';
+  } else {
+    var nd = [];
+    if (named.family) nd.push('<b>' + a(named.family) + '</b>');
+    if (named.size !== '' && named.size != null) nd.push('<b>' + a(named.size) + '&nbsp;pt</b>');
+    if (named.color) nd.push((/^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(named.color) ? '<span style="display:inline-block;width:10px;height:10px;border:1px solid #bbb;vertical-align:middle;margin-right:3px;background:' + a(named.color) + '"></span>' : '') + '<b>' + a(named.color) + '</b>');
+    namedDesc = 'currently ' + nd.join(', ');
+  }
+  var mode = c.MARKER_STYLE_MODE || 'set';
+  function ck(m) { return mode === m ? ' checked' : ''; }
   var h =
     '<style>body{font:13px Arial;margin:10px;color:#222}h3{font-size:13px;margin:14px 0 4px;color:#1a73e8;border-bottom:1px solid #e0e0e0;padding-bottom:2px}' +
     'label{display:block;margin:8px 0 2px;font-weight:bold}input{width:100%;padding:5px;box-sizing:border-box}' +
@@ -155,6 +186,21 @@ function showSettings() {
     '<input id="ola" type="number" min="0" value="' + a(c.OPEN_LOOKAHEAD) + '"></div>' +
     '<div><label>Max quote length <span class="hint">(opening &rarr; closing)</span></label>' +
     '<input id="mla" type="number" min="1" value="' + a(c.MAX_LOOKAHEAD) + '"></div></div>' +
+    '<h3>Marker text style <span class="hint">— the hook, line #, colon &amp; quote marks (not the quoted text)</span></h3>' +
+    '<label style="font-weight:normal"><input type="radio" name="mode" value="insert" style="width:auto;margin-right:6px"' + ck('insert') + ' onchange="syncMode()">' +
+    'Keep the formatting where it&rsquo;s inserted <span class="hint">(no restyling)</span></label>' +
+    '<label style="font-weight:normal"><input type="radio" name="mode" value="named" style="width:auto;margin-right:6px"' + ck('named') + ' onchange="syncMode()">' +
+    'Use the document&rsquo;s <b>Normal text</b> style <span class="hint">— ' + namedDesc + '</span></label>' +
+    '<label style="font-weight:normal"><input type="radio" name="mode" value="set" style="width:auto;margin-right:6px"' + ck('set') + ' onchange="syncMode()">' +
+    'Use a set style:</label>' +
+    '<div id="setbox" style="padding-left:22px">' +
+    '<div class="row2"><div><label>Font</label><input id="mff" value="' + a(c.MARKER_FONT_FAMILY) + '" placeholder="Arial"></div>' +
+    '<div><label>Size</label><input id="mfs" type="number" min="1" value="' + (c.MARKER_FONT_SIZE ? a(c.MARKER_FONT_SIZE) : '') + '" placeholder="11"></div>' +
+    '<div><label>Color</label><input id="mfc" value="' + a(c.MARKER_FONT_COLOR) + '" placeholder="#000000"></div></div>' +
+    '<label style="font-weight:normal;margin-top:6px"><input type="checkbox" id="mb" style="width:auto;margin-right:6px"' + (c.MARKER_BOLD ? ' checked' : '') + '>Bold' +
+    '<input type="checkbox" id="mi" style="width:auto;margin:0 6px 0 16px"' + (c.MARKER_ITALIC ? ' checked' : '') + '>Italic</label>' +
+    '<div class="hint" style="margin-top:4px"><a href="#" onclick="resetStyle();return false;">Reset to Arial, 11, #000000, regular</a></div>' +
+    '</div>' +
     '<div id="msg"></div>' +
     '<div class="btns"><button onclick="save()">Save</button>' +
     '<button class="sec" onclick="resetFmt()">Reset marker format</button>' +
@@ -162,13 +208,17 @@ function showSettings() {
     '<script>' +
     'function v(id){return document.getElementById(id).value;}' +
     'function s(id,val){document.getElementById(id).value=val;}' +
+    'function mode(){var r=document.getElementsByName("mode");for(var i=0;i<r.length;i++)if(r[i].checked)return r[i].value;return "set";}' +
+    'function syncMode(){document.getElementById("setbox").style.opacity=(mode()==="set")?"1":"0.45";}' +
     'function resetFmt(){s("hook","@AUTOLINE");s("qo",String.fromCharCode(34));s("qc",String.fromCharCode(34));s("ola","20");s("mla","4000");}' +
+    'function resetStyle(){s("mff","Arial");s("mfs","11");s("mfc","#000000");document.getElementById("mb").checked=false;document.getElementById("mi").checked=false;}' +
     'function save(){document.getElementById("msg").textContent="Saving…";' +
     'google.script.run.withSuccessHandler(function(){google.script.host.close();})' +
     '.withFailureHandler(function(e){document.getElementById("msg").textContent="Error: "+(e&&e.message?e.message:e);})' +
-    '.saveSettings(JSON.stringify({PRIMARY_DOC_ID:v("pid"),EXACT_MAP:v("emf"),HOOK:v("hook"),QUOTE_OPEN:v("qo"),QUOTE_CLOSE:v("qc"),OPEN_LOOKAHEAD:v("ola"),MAX_LOOKAHEAD:v("mla")}));}' +
+    '.saveSettings(JSON.stringify({PRIMARY_DOC_ID:v("pid"),EXACT_MAP:v("emf"),HOOK:v("hook"),QUOTE_OPEN:v("qo"),QUOTE_CLOSE:v("qc"),OPEN_LOOKAHEAD:v("ola"),MAX_LOOKAHEAD:v("mla"),MARKER_STYLE_MODE:mode(),MARKER_FONT_FAMILY:v("mff"),MARKER_FONT_SIZE:v("mfs"),MARKER_FONT_COLOR:v("mfc"),MARKER_BOLD:document.getElementById("mb").checked,MARKER_ITALIC:document.getElementById("mi").checked}));}' +
+    'syncMode();' +
     '</script>';
-  DocumentApp.getUi().showModalDialog(HtmlService.createHtmlOutput(h).setWidth(460).setHeight(560), 'QuoteFinder — settings');
+  DocumentApp.getUi().showModalDialog(HtmlService.createHtmlOutput(h).setWidth(460).setHeight(680), 'QuoteFinder — settings');
 }
 
 // Persist settings; an empty field clears that override (reverts to default).
@@ -189,27 +239,88 @@ function saveSettings(json) {
   set('QUOTE_CLOSE', o.QUOTE_CLOSE);
   set('OPEN_LOOKAHEAD', o.OPEN_LOOKAHEAD);
   set('MAX_LOOKAHEAD', o.MAX_LOOKAHEAD);
+  // marker scaffold style
+  var mode = (o.MARKER_STYLE_MODE === 'insert' || o.MARKER_STYLE_MODE === 'named' || o.MARKER_STYLE_MODE === 'set') ? o.MARKER_STYLE_MODE : 'set';
+  p.setProperty('MARKER_STYLE_MODE', mode);
+  set('MARKER_FONT_FAMILY', o.MARKER_FONT_FAMILY);      // blank => 'set' mode uses Arial
+  var mfs = String(o.MARKER_FONT_SIZE == null ? '' : o.MARKER_FONT_SIZE).trim();
+  if (!mfs || isNaN(parseFloat(mfs))) p.deleteProperty('MARKER_FONT_SIZE'); else p.setProperty('MARKER_FONT_SIZE', String(parseFloat(mfs)));  // blank => 11
+  var mfc = normHexColor_(o.MARKER_FONT_COLOR);         // only a valid hex survives; anything else clears -> #000000 default
+  if (!mfc) p.deleteProperty('MARKER_FONT_COLOR'); else p.setProperty('MARKER_FONT_COLOR', mfc);
+  p.setProperty('MARKER_BOLD', o.MARKER_BOLD ? 'true' : 'false');
+  p.setProperty('MARKER_ITALIC', o.MARKER_ITALIC ? 'true' : 'false');
+  // clean up the obsolete pre-mode toggle so a stale value can't linger
+  p.deleteProperty('STYLE_MARKER');
   return 'ok';
 }
 
-// ----------------------------------------------------------------------------
-// Scope: is a marker inside highlighted text? (background color present, and not
-// one of the tool's own flag shades). Used when HIGHLIGHTED_ONLY is on.
-// ----------------------------------------------------------------------------
-function isHighlighted_(textEl, start, endIncl) {
-  var lo = String(CONFIG.LOWCONF_COLOR).toLowerCase(), nf = String(CONFIG.NOTFOUND_COLOR).toLowerCase();
-  for (var o = start; o <= endIncl; o++) {
-    var bgc; try { bgc = textEl.getBackgroundColor(o); } catch (e) { bgc = null; }
-    if (bgc) { var b = bgc.toLowerCase(); if (b !== lo && b !== nf) return true; }
-  }
-  return false;
+// ---- selection-based scope ---------------------------------------------------
+// Position-independent per-marker signature (survives the offset-shifting edits
+// Apply makes): ok markers -> 'Q:'+normalized quote; malformed -> 'B:'+context.
+// Capture and check MUST both go through this with the same cfg() so they agree.
+function markerSig_(mk, c) {
+  return mk.kind === 'bad' ? ('B:' + (mk.context || '')) : ('Q:' + normalize_(mk.quoteRaw, c.CASE_INSENSITIVE).norm);
 }
+// Walk up from a selection element to its containing paragraph/list-item (the same
+// unit types collectUnits_ enumerates), so any selected run/cell resolves correctly.
+function paragraphOf_(el) {
+  for (var e = el, g = 0; e && g < 60; g++) {
+    var t; try { t = e.getType(); } catch (x) { return null; }
+    if (t === DocumentApp.ElementType.PARAGRAPH || t === DocumentApp.ElementType.LIST_ITEM) return e;
+    try { e = e.getParent(); } catch (x) { return null; }
+  }
+  return null;
+}
+// Signatures of the markers in the LIVE selection. Coarse by paragraph: any selected
+// element pulls in ALL markers of its paragraph. Returns:
+//   null      -> no selection at all (caller falls through to the whole document)
+//   {} or set -> a selection EXISTS (even if it hit no markers => process nothing)
+function selectionSigSet_(c) {
+  var sel; try { sel = DocumentApp.getActiveDocument().getSelection(); } catch (e) { sel = null; }
+  if (!sel) return null;
+  var els; try { els = sel.getRangeElements(); } catch (e) { els = null; }
+  if (!els || !els.length) return {};
+  var re = markerScanner_(c), sigs = {}, seen = {};
+  for (var i = 0; i < els.length; i++) {
+    var para = paragraphOf_(els[i].getElement());
+    if (!para) continue;
+    var key; try { key = para.getText(); } catch (e2) { key = null; }
+    if (key != null) { if (seen[key]) continue; seen[key] = true; }   // skip re-parsing same paragraph text
+    var ms = parseMarkersInPara_(para, re);
+    for (var j = 0; j < ms.length; j++) sigs[markerSig_(ms[j], c)] = true;
+  }
+  return sigs;
+}
+function sigCount_(sigs) { return sigs ? Object.keys(sigs).length : 0; }
+
+// Snapshot the selection for the Review session (a modeless dialog can't read the
+// live selection). Chunked to stay under the ~9KB-per-property limit. Writing null
+// CLEARS it, so a stale snapshot can never survive into a new no-selection session.
+function writeSelectionSnapshot_(sigs) {
+  var p = PropertiesService.getDocumentProperties();
+  var old = parseInt(p.getProperty('SELECTION_SNAPSHOT_N') || '0', 10) || 0;
+  for (var i = 0; i < old; i++) p.deleteProperty('SELECTION_SNAPSHOT_' + i);
+  p.deleteProperty('SELECTION_SNAPSHOT_N');
+  if (sigs == null) return;
+  var json = JSON.stringify(Object.keys(sigs)), CH = 8000, parts = [];  // empty set -> "[]" (one chunk, truthy on read)
+  for (var s = 0; s < json.length; s += CH) parts.push(json.substring(s, s + CH));
+  for (var k = 0; k < parts.length; k++) p.setProperty('SELECTION_SNAPSHOT_' + k, parts[k]);
+  p.setProperty('SELECTION_SNAPSHOT_N', String(parts.length));
+}
+function readSelectionSnapshot_() {
+  var p = PropertiesService.getDocumentProperties();
+  var n = p.getProperty('SELECTION_SNAPSHOT_N');
+  if (n == null) return null;
+  n = parseInt(n, 10) || 0;
+  var json = ''; for (var i = 0; i < n; i++) json += (p.getProperty('SELECTION_SNAPSHOT_' + i) || '');
+  try { var arr = JSON.parse(json || '[]'), set = {}; for (var j = 0; j < arr.length; j++) set[arr[j]] = true; return set; }
+  catch (e) { return null; }
+}
+
+// Scope: a drag-selection (if any) limits to its markers; otherwise the whole document.
 function markerInScope_(c, textEl, mk) {
-  if (!c.HIGHLIGHTED_ONLY) return true;
-  var len = textEl.getText().length;
-  var endIncl = Math.min(len - 1, mk.quoteRawEnd);
-  if (endIncl < mk.matchStart) endIncl = mk.matchStart;
-  return isHighlighted_(textEl, mk.matchStart, endIncl);
+  if (c._selectionSigs) return c._selectionSigs[markerSig_(mk, c)] === true;
+  return true;
 }
 
 function extractDocId_(s) {
@@ -237,6 +348,7 @@ function isSpaceCode_(code) {  // spaces (NOT line breaks)
 }
 function isWsCode_(code) { return isBreakCode_(code) || isSpaceCode_(code); }
 
+var LIGATURES_ = { 'ﬀ': 'ff', 'ﬁ': 'fi', 'ﬂ': 'fl', 'ﬃ': 'ffi', 'ﬄ': 'ffl', 'ﬅ': 'ft', 'ﬆ': 'st' };
 function normalize_(raw, caseInsensitive) {
   var norm = [], map = [];
   var prevSpace = true; // treat leading whitespace as collapsible
@@ -250,6 +362,12 @@ function normalize_(raw, caseInsensitive) {
     if (ch === '“' || ch === '”' || ch === '„' || ch === '«' || ch === '»') ch = '"';
     else if (ch === '‘' || ch === '’' || ch === '‚' || ch === '′') ch = "'";
     else if (ch === '–' || ch === '—' || ch === '−') ch = '-';
+    var lig = LIGATURES_[ch];                    // ﬁ/ﬂ/… (common PDF artifacts) -> their letters
+    if (lig) {                                   // expand to multiple chars, all mapped to this raw offset
+      for (var g = 0; g < lig.length; g++) { norm.push(caseInsensitive ? lig.charAt(g).toLowerCase() : lig.charAt(g)); map.push(i); }
+      prevSpace = false;
+      continue;
+    }
     norm.push(caseInsensitive ? ch.toLowerCase() : ch);
     map.push(i);
     prevSpace = false;
@@ -399,7 +517,6 @@ function layoutParagraph_(textEl, rawText, usableFirst, usableRest) {
   return { lineStarts: lineStarts, approximated: approximated };
 }
 
-function numOr0_(thunk) { try { var v = thunk(); return v ? v : 0; } catch (e) { return 0; } }
 function lineForRaw_(lineStarts, rawOff) {
   var L = 0;
   for (var i = 0; i < lineStarts.length; i++) { if (lineStarts[i] <= rawOff) L = i; else break; }
@@ -428,9 +545,10 @@ function buildPrimaryIndex_(c, withSim) {
     var rec = { textEl: textEl, raw: raw, norm: nm.norm, map: nm.map };
 
     if (withSim) {
-      var indentS = numOr0_(function () { return para.getIndentStart(); });
-      var indentE = numOr0_(function () { return para.getIndentEnd(); });
-      var indentF = numOr0_(function () { return para.getIndentFirstLine(); });
+      var indentS = 0, indentE = 0, indentF = 0;
+      try { indentS = para.getIndentStart() || 0; } catch (e) {}
+      try { indentE = para.getIndentEnd() || 0; } catch (e) {}
+      try { indentF = para.getIndentFirstLine() || 0; } catch (e) {}
       var uFirst = Math.max(40, pageW - mL - mR - indentF - indentE);
       var uRest  = Math.max(40, pageW - mL - mR - indentS - indentE);
       var lay = layoutParagraph_(textEl, raw, uFirst, uRest);
@@ -505,6 +623,54 @@ function locate_(index, qnorm) {
   return { found: true, startLine: index.lineNo[first], endLine: index.lineNo[first + qnorm.length - 1], count: count };
 }
 
+// ---- PDF refinement: gDoc gives the ballpark line; the PDF fine-tunes it --------
+// Char-index bounds [lo,hi) of all chars whose PDF line is within ±win of centerLine.
+// lineNoArr is non-decreasing (lines appended in document order), so use lower/upper
+// bounds — tolerant of repeats (each line spans many chars) and gaps (missing line #s).
+function lineWindowRange_(lineNoArr, centerLine, win) {
+  var n = lineNoArr.length;
+  if (!n) return { lo: 0, hi: 0 };
+  var loLine = centerLine - win, hiLine = centerLine + win, a, b, mid;
+  a = 0; b = n; while (a < b) { mid = (a + b) >> 1; if (lineNoArr[mid] < loLine) a = mid + 1; else b = mid; }
+  var lo = a;
+  a = 0; b = n; while (a < b) { mid = (a + b) >> 1; if (lineNoArr[mid] <= hiLine) a = mid + 1; else b = mid; }
+  var hi = a;
+  if (hi < lo) hi = lo;
+  return { lo: lo, hi: hi };
+}
+// Given a gDoc estimate (estStartLine/estEndLine), return the PDF line range for a quote
+// piece: (1) any EXACT occurrence anywhere, pick the one NEAREST the estimate; else
+// (2) FUZZY match within ±PDF_WINDOW lines of the estimate; else (3) the gDoc estimate
+// itself (estimated:true). So a quote found in the doc never lacks a line number.
+function refinePieceWithPdf_(exactIndex, pieceNorm, estStartLine, estEndLine, c) {
+  if (!exactIndex || !exactIndex.concat || !pieceNorm) return { start: estStartLine, end: estEndLine, estimated: true };
+  var win = (c && c.PDF_WINDOW != null) ? c.PDF_WINDOW : 40;
+  var fmin = (c && c.PDF_FUZZY_MIN != null) ? c.PDF_FUZZY_MIN : 0.5;
+  var est0 = (estStartLine == null) ? 0 : estStartLine;   // no gDoc estimate (cross-paragraph) -> take first occurrence
+  var lineNo = exactIndex.lineNo, concat = exactIndex.concat;
+  // (1) exact occurrences (global), nearest to the estimate
+  var bestPos = -1, bestDist = Infinity, from = 0, p;
+  while ((p = concat.indexOf(pieceNorm, from)) >= 0) {
+    var d = Math.abs(lineNo[p] - est0);
+    if (d < bestDist) { bestDist = d; bestPos = p; }
+    from = p + 1;
+  }
+  if (bestPos >= 0) return { start: lineNo[bestPos], end: lineNo[bestPos + pieceNorm.length - 1], estimated: false };
+  // (2) fuzzy within the window around the estimate
+  var rng = lineWindowRange_(lineNo, est0, win);
+  if (rng.hi > rng.lo) {
+    var slice = concat.substring(rng.lo, rng.hi);
+    var f = fuzzyInParagraph_(slice, pieceNorm, words_(pieceNorm));
+    if (f.found && f.sim >= fmin) {
+      var s = rng.lo + f.S, e = rng.lo + f.E - 1;
+      if (e < s) e = s; if (e >= lineNo.length) e = lineNo.length - 1;
+      return { start: lineNo[s], end: lineNo[e], estimated: false };
+    }
+  }
+  // (3) gDoc fallback
+  return { start: estStartLine, end: estEndLine, estimated: true };
+}
+
 // A quote containing an elision such as  [...]  /  […]  /  [. . .]  is a SPLIT
 // quote: each side is matched independently and the reported range runs from the
 // start of the first piece to the end of the last piece.
@@ -521,19 +687,37 @@ function splitQuote_(quoteRaw) {                 // -> [{raw, offset}] pieces wi
   return pieces.filter(function (p) { return /\S/.test(p.raw); });
 }
 
-// Locate a (possibly split) quote in a concat index -> first-piece start .. last-piece end.
-function lookupLineRange_(index, quoteRaw, c) {
+// Locate a (possibly split) quote -> first-piece start .. last-piece end. The gDoc/sim
+// index decides EXISTENCE and the ballpark line; in exact mode each piece is then
+// fine-tuned against the PDF (estimated:true if the PDF couldn't pin it). Used by the
+// auto Update and Preview paths. `exactIndex` may be null (sim mode / no PDF file).
+function lookupLineRange_(simIndex, exactIndex, mode, quoteRaw, c) {
   var pieces = splitQuote_(quoteRaw);
   if (!pieces.length) return { found: false };
-  var first = null, last = null, count = 0;
+  var firstStart = null, lastEnd = null, count = 0, anyEst = false;
   for (var i = 0; i < pieces.length; i++) {
-    var info = locate_(index, normalize_(pieces[i].raw, c.CASE_INSENSITIVE).norm);
-    if (!info.found) return { found: false, failedPiece: i };
-    if (i === 0) first = info;
-    last = info;
-    count += info.count;
+    var pn = normalize_(pieces[i].raw, c.CASE_INSENSITIVE).norm;
+    var est = locate_(simIndex, pn);                 // gDoc estimate (ballpark + existence)
+    var ps, pe, pest;
+    if (mode === 'exact' && exactIndex) {
+      // The PDF concat joins lines with spaces, so it can find a quote that crosses a
+      // hard paragraph break (which the sim concat can't). So: refine via the PDF, using
+      // the sim estimate as the ballpark when available; if the PDF can't pin it AND the
+      // sim never located it either, the piece is genuinely absent.
+      var r = refinePieceWithPdf_(exactIndex, pn, est.found ? est.startLine : null, est.found ? est.endLine : null, c);
+      if (r.estimated && !est.found) return { found: false, failedPiece: i };
+      ps = r.start; pe = r.end; pest = r.estimated;
+      count += (est.found ? est.count : 1);
+    } else {
+      if (!est.found) return { found: false, failedPiece: i };
+      ps = est.startLine; pe = est.endLine; pest = false;
+      count += est.count;
+    }
+    if (i === 0) firstStart = ps;
+    lastEnd = pe;
+    if (pest) anyEst = true;
   }
-  return { found: true, startLine: first.startLine, endLine: last.endLine, count: count, pieces: pieces.length };
+  return { found: true, startLine: firstStart, endLine: lastEnd, count: count, pieces: pieces.length, estimated: anyEst };
 }
 
 // Copy formatting piece-by-piece (each piece from its own manuscript match).
@@ -557,6 +741,46 @@ function findFormatSource_(paras, qnorm) {
     if (pos >= 0) return { para: paras[i], normPos: pos };
   }
   return null;
+}
+
+// True when a manuscript core can be spliced into the marker body WITHOUT breaking the
+// marker on a later re-parse. It must contain neither a [...] elision (which splitQuote_
+// would read as a phantom separator, inflating the piece count and silently defeating the
+// 1:1 alignment guard) nor the CLOSING quote mark (which markerRe_ would treat as the end
+// of the quote, truncating the marker). When unsafe we keep the user's piece verbatim.
+function coreInjectable_(core, c) {
+  if (hasElision_(core)) return false;
+  var closeRe = new RegExp(bracketRe_((c && c.QUOTE_CLOSE) || '"', false));
+  return !closeRe.test(core);
+}
+
+// "Use manuscript" on a split [...] quote: rebuild the quote body so each FUZZY piece
+// is corrected to its manuscript wording (the same text the diff compared against),
+// while KEEPING exact pieces verbatim and preserving the user's [...] separators and the
+// whitespace around each piece. pieceCands[i] (from locateCandidate2_) lines up 1:1 with
+// splitQuote_(quoteRaw)[i]. Returns the new body, or null if it can't rebuild safely.
+function rebuildSplitQuote_(quoteRaw, pieceCands, primary, c) {
+  var pieces = splitQuote_(quoteRaw);
+  if (!pieces.length || !pieceCands || pieces.length !== pieceCands.length) return null;
+  var out = '', cursor = 0;
+  for (var i = 0; i < pieces.length; i++) {
+    out += quoteRaw.substring(cursor, pieces[i].offset);     // inter-piece text incl. the [...] separators
+    var raw = pieces[i].raw, pc = pieceCands[i];
+    var fuzzy = pc && pc.status === 'fuzzy' && pc.srcParaIndex != null && primary.paras[pc.srcParaIndex] &&
+                typeof pc.srcRawStart === 'number' && typeof pc.srcRawEndIncl === 'number' &&
+                pc.srcRawEndIncl >= pc.srcRawStart;
+    var core = fuzzy ? primary.paras[pc.srcParaIndex].raw.substring(pc.srcRawStart, pc.srcRawEndIncl + 1) : null;
+    if (fuzzy && coreInjectable_(core, c)) {
+      var lead = (raw.match(/^\s*/) || [''])[0];             // keep the user's spacing around the piece
+      var trail = (raw.match(/\s*$/) || [''])[0];
+      out += lead + core + trail;                            // manuscript wording for the differing piece
+    } else {
+      out += raw;                                            // exact / unresolved / unsafe core: keep the user's text
+    }
+    cursor = pieces[i].offset + raw.length;
+  }
+  out += quoteRaw.substring(cursor);
+  return out;
 }
 
 // ============================================================================
@@ -589,7 +813,10 @@ function markerRe_(c) {
 // Finds bare hook occurrences, so a hook with no nearby quote can be flagged.
 function hookRe_(c) { return new RegExp(escapeRegex_(c.HOOK || '@AUTOLINE'), 'g'); }
 function openTestRe_(c) { return new RegExp('^\\s*[\\s\\S]{0,' + openLookahead_(c) + '}?(?:' + bracketRe_(c.QUOTE_OPEN || '"', true) + ')'); }
-function markerScanner_(c) { return { full: markerRe_(c), hook: hookRe_(c), openTest: openTestRe_(c), ola: openLookahead_(c) }; }
+function markerScanner_(c) { return { full: markerRe_(c), hook: hookRe_(c), openTest: openTestRe_(c), ola: openLookahead_(c), hookLen: (c.HOOK || '@AUTOLINE').length }; }
+// The ~20 characters right after the hook — shown for malformed markers so the
+// user can locate the broken marker in the document.
+function afterHook_(raw, hookStart, hookLen) { return raw.substring(hookStart + hookLen, hookStart + hookLen + 20).replace(/\s+/g, ' '); }
 
 // scan = markerScanner_(cfg()) built once by the caller and reused per paragraph.
 // Returns entries with kind 'ok' (complete marker) or 'bad' (hook present but the
@@ -607,11 +834,11 @@ function parseMarkersInPara_(para, scan) {
     var prefixLen = whole.length - closeLen - quote.length - openLen;     // hook (+ any old num/colon), up to open mark
     spans.push([start, start + whole.length]);
     var e = {
-      matchStart: start, prefixLen: prefixLen,
+      matchStart: start, prefixLen: prefixLen, openLen: openLen, closeLen: closeLen,
       oldNum: whole.slice(0, prefixLen).replace(/\s+$/, ''),  // original prefix (hook + any old number/colon)
       quoteRaw: quote, quoteRawStart: quoteRawStart, quoteRawEnd: quoteRawStart + quote.length
     };
-    if (!quote || !/\S/.test(quote)) { e.kind = 'bad'; e.reason = 'empty quote'; e.quoteRawEnd = start + prefixLen; }
+    if (!quote || !/\S/.test(quote)) { e.kind = 'bad'; e.reason = 'empty quote'; e.quoteRawEnd = start + prefixLen; e.context = afterHook_(raw, start, scan.hookLen); }
     else e.kind = 'ok';
     found.push(e);
   }
@@ -626,7 +853,7 @@ function parseMarkersInPara_(para, scan) {
     found.push({
       kind: 'bad',
       matchStart: p.index, prefixLen: hk.length,
-      oldNum: hk,
+      oldNum: hk, context: afterHook_(raw, p.index, scan.hookLen),
       quoteRaw: '', quoteRawStart: p.index + hk.length, quoteRawEnd: p.index + hk.length,
       reason: scan.openTest.test(raw.slice(p.index + hk.length)) ? 'opening quote but no closing quote' : ('no quotation within ' + scan.ola + ' characters')
     });
@@ -639,32 +866,48 @@ function parseMarkersInPara_(para, scan) {
 // ============================================================================
 // Formatting copy (manuscript -> response quote)
 // ============================================================================
-function readStyle_(t, o) {
-  return {
-    bold: t.isBold(o), italic: t.isItalic(o),
-    color: t.getForegroundColor(o) || '#000000',
-    align: t.getTextAlignment(o) || DocumentApp.TextAlignment.NORMAL
-  };
+// ---- styles read once per formatting RUN, not per character (the speed win) ----
+// Uses the same getters as before (isBold/getForegroundColor/…) — just at run
+// boundaries — so behavior matches the known-good per-character version exactly.
+function styleRuns_(t) {
+  var idx; try { idx = t.getTextAttributeIndices(); } catch (e) { idx = [0]; }
+  if (!idx || !idx.length) idx = [0];
+  var runs = [];
+  for (var i = 0; i < idx.length; i++) {
+    var o = idx[i], bold = false, ital = false, col = null, al = null;
+    try { bold = t.isBold(o); } catch (e) {}
+    try { ital = t.isItalic(o); } catch (e) {}
+    try { col = t.getForegroundColor(o); } catch (e) {}
+    try { al = t.getTextAlignment(o); } catch (e) {}
+    runs.push({ start: o, bold: !!bold, italic: !!ital, color: col || '#000000', align: al || DocumentApp.TextAlignment.NORMAL });
+  }
+  return runs;
+}
+function styleAt_(runs, o) {            // run whose start <= o (runs sorted ascending)
+  var lo = 0;
+  for (var i = 0; i < runs.length; i++) { if (runs[i].start <= o) lo = i; else break; }
+  return runs[lo];
 }
 function eqStyle_(a, b) { return a && b && a.bold === b.bold && a.italic === b.italic && a.color === b.color && a.align === b.align; }
-function writeStyle_(t, a, b, st) {
+function writeStyle_(t, a, b, st) {     // one write per run, using the original setters
   if (b < a) return;
-  t.setBold(a, b, st.bold);
-  t.setItalic(a, b, st.italic);
-  t.setForegroundColor(a, b, st.color);
-  t.setTextAlignment(a, b, st.align);
+  try { t.setBold(a, b, st.bold); } catch (e) {}
+  try { t.setItalic(a, b, st.italic); } catch (e) {}
+  try { t.setForegroundColor(a, b, st.color); } catch (e) {}
+  try { t.setTextAlignment(a, b, st.align); } catch (e) {}
 }
 
 // Copy formatting char-by-char from a manuscript range to the response quote,
-// aligning by normalized index (handles whitespace/case differences).
+// aligning by normalized index. Source styles are read once per run (cached).
 function copyFormatting_(srcTextEl, srcMap, srcNormPos, dstTextEl, dstQuoteRawStart, dstQuoteRaw, qnorm, caseInsensitive) {
   var dn = normalize_(dstQuoteRaw, caseInsensitive);
   var qlen = Math.min(qnorm.length, dn.norm.length);
+  var srcRuns = styleRuns_(srcTextEl);
   var runStartDst = -1, runEndDst = -1, runStyle = null;
   for (var k = 0; k < qlen; k++) {
     var srcRaw = srcMap[srcNormPos + k];
     var dstRaw = dstQuoteRawStart + dn.map[k];
-    var st = readStyle_(srcTextEl, srcRaw);
+    var st = styleAt_(srcRuns, srcRaw);
     if (runStyle && eqStyle_(runStyle, st) && dstRaw === runEndDst + 1) {
       runEndDst = dstRaw;
     } else {
@@ -680,25 +923,125 @@ function copyFormatting_(srcTextEl, srcMap, srcNormPos, dstTextEl, dstQuoteRawSt
 function copyRangeIdentity_(srcTextEl, srcStart, srcEndIncl, dstTextEl, dstStart) {
   var n = srcEndIncl - srcStart;
   if (n < 0) return;
-  var runStart = 0, cur = readStyle_(srcTextEl, srcStart);
+  var runs = styleRuns_(srcTextEl);
+  var runStart = 0, cur = styleAt_(runs, srcStart);
   for (var i = 1; i <= n; i++) {
-    var st = readStyle_(srcTextEl, srcStart + i);
+    var st = styleAt_(runs, srcStart + i);
     if (!eqStyle_(st, cur)) { writeStyle_(dstTextEl, dstStart + runStart, dstStart + i - 1, cur); runStart = i; cur = st; }
   }
   writeStyle_(dstTextEl, dstStart + runStart, dstStart + n, cur);
 }
 
-// safe background-color set/clear (the offset overload rejects null directly)
-function bg_(t, a, b, color) {
+// ---- marker scaffold style (hook + number + colon + quotation marks) ----------
+// Convert a Docs API rgbColor ({red,green,blue} floats 0..1; missing component => 0; the empty
+// object {} that Docs returns for pure black => #000000) to a #rrggbb string.
+function rgbToHex_(rgb) {
+  rgb = rgb || {};
+  function h(v) { v = Math.round((v || 0) * 255); if (v < 0) v = 0; if (v > 255) v = 255; var s = v.toString(16); return s.length < 2 ? '0' + s : s; }
+  return '#' + h(rgb.red) + h(rgb.green) + h(rgb.blue);
+}
+
+// Is the Docs API advanced service enabled? (Needed for the 'named' style mode.)
+function docsApiAvailable_() { return (typeof Docs !== 'undefined' && Docs && Docs.Documents) ? true : false; }
+
+// Read the document-wide "Normal text" NAMED STYLE via the Docs Advanced Service (Docs API v1)
+// — the definition the user sets in Format > Paragraph styles > Normal text, which applies
+// document-wide. Returns {family,size,color} with '' for anything unreadable (and all-blank when
+// the service isn't enabled or the style is absent). Used by the 'named' mode + the Settings dialog.
+function namedNormalStyle_() {
+  var out = { family: '', size: '', color: '' };
+  if (!docsApiAvailable_()) return out;
   try {
-    if (color === null) {
-      var attr = {};
-      attr[DocumentApp.Attribute.BACKGROUND_COLOR] = null;
-      t.setAttributes(a, b, attr);
-    } else {
-      t.setBackgroundColor(a, b, color);
+    var id = DocumentApp.getActiveDocument().getId();
+    var doc = Docs.Documents.get(id, { fields: 'namedStyles' });   // partial response: just the styles
+    var styles = doc && doc.namedStyles && doc.namedStyles.styles;
+    if (!styles) return out;
+    var ts = null;
+    for (var i = 0; i < styles.length; i++) {
+      if (styles[i] && styles[i].namedStyleType === 'NORMAL_TEXT') { ts = styles[i].textStyle; break; }
     }
+    if (!ts) return out;
+    if (ts.weightedFontFamily && ts.weightedFontFamily.fontFamily) out.family = ts.weightedFontFamily.fontFamily;
+    if (ts.fontSize && ts.fontSize.magnitude != null) out.size = ts.fontSize.magnitude;
+    if (ts.foregroundColor && ts.foregroundColor.color && ts.foregroundColor.color.rgbColor)
+      out.color = rgbToHex_(ts.foregroundColor.color.rgbColor);   // skip theme-only colors (no rgbColor)
   } catch (e) {}
+  return out;
+}
+
+// Resolve the scaffold style for the marker (hook + line number(s) + colon + quotation marks —
+// NOT the quoted text). Stashed once per run on c._markerStyle. The mode is the user's explicit
+// choice from Settings:
+//   'insert' -> null   (no restyling — the scaffold keeps the formatting where it sits)
+//   'named'  -> the document-wide Normal text style (Docs API), or null if unavailable/empty
+//              (so it harmlessly behaves like 'insert' until the Docs API is enabled)
+//   'set'    -> the explicit font/size/color + bold/italic (defaults: Arial / 11 / #000000 / regular)
+function resolveMarkerStyle_(c) {
+  var mode = c.MARKER_STYLE_MODE || 'set';
+  if (mode === 'insert') return null;
+  if (mode === 'named') {
+    var nrm = namedNormalStyle_();
+    var fam = nrm.family || null;
+    var size = (nrm.size !== '' && nrm.size != null) ? nrm.size : null;
+    var col = nrm.color || null;
+    if (fam == null && size == null && col == null) return null;   // API off / style empty -> keep insert formatting
+    return { family: fam, size: size, color: col };
+  }
+  return {                                                          // 'set'
+    family: c.MARKER_FONT_FAMILY || 'Arial',
+    size: (c.MARKER_FONT_SIZE && c.MARKER_FONT_SIZE > 0) ? c.MARKER_FONT_SIZE : 11,
+    color: c.MARKER_FONT_COLOR || '#000000',
+    bold: !!c.MARKER_BOLD,
+    italic: !!c.MARKER_ITALIC
+  };
+}
+function applyTextStyle_(textEl, a, b, style) {
+  if (!style || a == null || b == null || b < a) return;
+  try { if (style.family) textEl.setFontFamily(a, b, style.family); } catch (e) {}
+  try { if (style.size)   textEl.setFontSize(a, b, style.size); } catch (e) {}
+  try { if (style.color)  textEl.setForegroundColor(a, b, style.color); } catch (e) {}
+  try { if (typeof style.bold === 'boolean')   textEl.setBold(a, b, style.bold); } catch (e) {}     // 'set' mode: force regular/bold
+  try { if (typeof style.italic === 'boolean') textEl.setItalic(a, b, style.italic); } catch (e) {} // 'set' mode: force regular/italic
+}
+// Style the scaffold of a marker AT ITS CURRENT LAYOUT (after any prefix rewrite):
+// prefix + opening mark = [matchStart, openEnd]; closing mark = [closeStart, closeEnd].
+function styleMarkerScaffold_(textEl, matchStart, openEnd, closeStart, closeEnd, style) {
+  applyTextStyle_(textEl, matchStart, openEnd, style);
+  applyTextStyle_(textEl, closeStart, closeEnd, style);
+}
+
+// Set or clear a background color on a text range. The range overload accepts a
+// hex string OR null (to clear); setAttributes is a fallback. (setAttributes with a
+// null value can silently no-op, which is why the range overload is tried first.)
+function bg_(t, a, b, color) {
+  if (a == null || b == null || b < a) return;
+  try { t.setBackgroundColor(a, b, color); return; } catch (e) {}
+  try { var x = {}; x[DocumentApp.Attribute.BACKGROUND_COLOR] = color; t.setAttributes(a, b, x); } catch (e2) {}
+}
+
+function isFlagShade_(bg, c) {              // is this background one of OUR flag colors?
+  if (!bg) return false;
+  bg = String(bg).toLowerCase();
+  return bg === String(c.LOWCONF_COLOR).toLowerCase() || bg === String(c.NOTFOUND_COLOR).toLowerCase();
+}
+
+// Clear the tool's own yellow/red flags from every marker prefix (leaves any
+// highlights YOU applied untouched). Returns how many were cleared.
+function clearFlags_(c) {
+  var body = DocumentApp.getActiveDocument().getBody();
+  var units = [];
+  for (var i = 0; i < body.getNumChildren(); i++) collectUnits_(body.getChild(i), units, false);
+  var re = markerScanner_(c), n = 0;
+  for (var u = 0; u < units.length; u++) {
+    var t = units[u].el.editAsText();
+    var ms = parseMarkersInPara_(units[u].el, re);
+    for (var k = 0; k < ms.length; k++) {
+      var mk = ms[k], bgc;
+      try { bgc = t.getBackgroundColor(mk.matchStart); } catch (e) { bgc = null; }
+      if (isFlagShade_(bgc, c)) { bg_(t, mk.matchStart, mk.matchStart + mk.prefixLen - 1, null); n++; }
+    }
+  }
+  return n;
 }
 
 // ============================================================================
@@ -708,13 +1051,17 @@ function runUpdate_(mode) {
   var ui = DocumentApp.getUi();
   var c = cfg();
   if (!c.PRIMARY_DOC_ID) { ui.alert('Set the primary doc first (QuoteFinder → Settings…).'); return; }
+  c._selectionSigs = selectionSigSet_(c);          // LIVE selection scope (menu command)
+  c._markerStyle = resolveMarkerStyle_(c);         // scaffold style (hook/number/colon/quote marks)
 
   var primary, exactIndex = null, simIndex = null;
   try {
-    primary = buildPrimaryIndex_(c, mode === 'sim');
-    if (mode === 'sim') simIndex = primary.sim;
+    primary = buildPrimaryIndex_(c, true);       // sim layout always (gDoc estimate; exact mode refines it)
+    simIndex = primary.sim;
     if (mode === 'exact') exactIndex = buildExactIndex_(c, loadExactMap_(c));
   } catch (e) { ui.alert('Setup problem:\n' + e.message); return; }
+
+  if (!c._selectionSigs) clearFlags_(c);   // clean slate (whole-doc only; selection leaves other markers alone)
 
   var responseBody = DocumentApp.getActiveDocument().getBody();
   var units = [];
@@ -736,16 +1083,16 @@ function runUpdate_(mode) {
       if (!markerInScope_(c, textEl, mk)) continue;
       if (mk.kind === 'bad') {                 // hook present, but quote missing/unterminated/empty
         stats.malformed++;
-        if (!c.HIGHLIGHTED_ONLY) bg_(textEl, mk.matchStart, mk.matchStart + mk.prefixLen - 1, c.NOTFOUND_COLOR);
-        problems.push('MALFORMED (' + mk.reason + '): ' + mk.oldNum);
+        bg_(textEl, mk.matchStart, mk.matchStart + mk.prefixLen - 1, c.NOTFOUND_COLOR);
+        problems.push('MALFORMED (' + mk.reason + '): ' + c.HOOK + mk.context + ' …');
         continue;
       }
       // line number(s): split quotes ([...]) span first-piece-start .. last-piece-end
-      var lineInfo = lookupLineRange_(mode === 'sim' ? simIndex : exactIndex, mk.quoteRaw, c);
+      var lineInfo = lookupLineRange_(simIndex, exactIndex, mode, mk.quoteRaw, c);
 
       if (!lineInfo.found) {
         stats.notFound++;
-        if (!c.HIGHLIGHTED_ONLY) bg_(textEl, mk.matchStart, mk.matchStart + mk.prefixLen - 1, c.NOTFOUND_COLOR);
+        bg_(textEl, mk.matchStart, mk.matchStart + mk.prefixLen - 1, c.NOTFOUND_COLOR);
         problems.push('NOT FOUND: "' + snippet_(mk.quoteRaw) + '"');
         continue;
       }
@@ -765,24 +1112,32 @@ function runUpdate_(mode) {
       textEl.insertText(mk.matchStart, newPrefix);
 
       var fp0 = splitQuote_(mk.quoteRaw)[0];
-      var low = (mode === 'sim') && fp0 && lineNumberLowConf_(primary, normalize_(fp0.raw, c.CASE_INSENSITIVE).norm);
+      var low = (mode === 'sim')
+        ? (fp0 && lineNumberLowConf_(primary, normalize_(fp0.raw, c.CASE_INSENSITIVE).norm))   // sim: table/image drift
+        : !!lineInfo.estimated;                                                                // exact: PDF couldn't pin it
       if (low) stats.lowConf++;
-      // In highlighted-only mode, never touch backgrounds (preserves your highlights).
-      if (!c.HIGHLIGHTED_ONLY) bg_(textEl, mk.matchStart, mk.matchStart + newPrefix.length - 1, low ? c.LOWCONF_COLOR : null);
+      bg_(textEl, mk.matchStart, mk.matchStart + newPrefix.length - 1, low ? c.LOWCONF_COLOR : null);
+      if (c._markerStyle) {                          // style scaffold; body unchanged here, so use the original length
+        var openLen = (mk.openLen != null) ? mk.openLen : (mk.quoteRawStart - mk.matchStart - mk.prefixLen);
+        var closeLen = (mk.closeLen != null) ? mk.closeLen : 1;
+        var base = mk.matchStart + newPrefix.length, bodyLen = mk.quoteRawEnd - mk.quoteRawStart;
+        var cStart = base + openLen + bodyLen;
+        styleMarkerScaffold_(textEl, mk.matchStart, base + openLen - 1, cStart, cStart + closeLen - 1, c._markerStyle);
+      }
       stats.updated++;
     }
   }
 
-  var scopeNote = c.HIGHLIGHTED_ONLY ? ' [highlighted text only]' : '';
+  var scopeNote = c._selectionSigs ? (' [Scope: ' + sigCount_(c._selectionSigs) + ' selected quote(s)]') : '';
   var msg = 'QuoteFinder (' + (mode === 'sim' ? 'gDoc (Estimated Line #)' : 'PDF/JSON (Exact Line #)') + ')' + scopeNote + ' done.\n\n' +
     'Updated: ' + stats.updated + '\n' +
-    (stats.lowConf ? 'Low-confidence' + (c.HIGHLIGHTED_ONLY ? '' : ' (yellow)') + ': ' + stats.lowConf + '\n' : '') +
-    (stats.notFound ? 'Not found' + (c.HIGHLIGHTED_ONLY ? '' : ' (red)') + ': ' + stats.notFound + '\n' : '') +
-    (stats.malformed ? 'Malformed marker' + (c.HIGHLIGHTED_ONLY ? '' : ' (red)') + ': ' + stats.malformed + '\n' : '') +
+    (stats.lowConf ? 'Low-confidence (yellow): ' + stats.lowConf + '\n' : '') +
+    (stats.notFound ? 'Not found (red): ' + stats.notFound + '\n' : '') +
+    (stats.malformed ? 'Malformed marker (red): ' + stats.malformed + '\n' : '') +
     (stats.multi ? 'Multiple matches: ' + stats.multi + '\n' : '') +
     (stats.noFormat ? 'Formatting skipped: ' + stats.noFormat + '\n' : '');
-  if (c.HIGHLIGHTED_ONLY && stats.updated === 0 && stats.notFound === 0)
-    msg += '\nNo highlighted @AUTOLINE markers were found. Give the marker/quote text a highlight color, or turn off QuoteFinder → "Scan highlighted text only".\n';
+  if (c._selectionSigs && sigCount_(c._selectionSigs) === 0)
+    msg += '\nYour selection contained no @AUTOLINE markers, so nothing was changed. Select the quote line(s) you want, then run again.\n';
   if (problems.length) msg += '\nDetails:\n• ' + problems.slice(0, 25).join('\n• ') + (problems.length > 25 ? '\n…(' + (problems.length - 25) + ' more)' : '');
   ui.alert(msg);
 }
@@ -807,24 +1162,25 @@ function previewMatches() {
   var ui = DocumentApp.getUi();
   var c = cfg();
   if (!c.PRIMARY_DOC_ID) { ui.alert('Set the primary doc first (QuoteFinder → Settings…).'); return; }
+  c._selectionSigs = selectionSigSet_(c);          // LIVE selection scope (menu command)
 
-  var index = null, label = '', note = '';
-  try {                                       // prefer the exact (PDF/JSON) engine — ground truth
-    index = buildExactIndex_(c, loadExactMap_(c));
-    label = 'PDF/JSON (Exact Line #)';
-  } catch (e) {                               // fall back to the gDoc estimate
-    try { index = buildPrimaryIndex_(c, true).sim; }
-    catch (e2) { ui.alert('Setup problem:\n' + e2.message); return; }
-    label = 'gDoc (Estimated Line #)';
+  var simIndex, label, note = '', mode;
+  try { simIndex = buildPrimaryIndex_(c, true).sim; }              // gDoc estimate — always
+  catch (e2) { ui.alert('Setup problem:\n' + e2.message); return; }
+  var exactIndex = null;
+  try {                                                           // prefer the exact (PDF/JSON) engine — ground truth
+    exactIndex = buildExactIndex_(c, loadExactMap_(c)); mode = 'exact'; label = 'PDF/JSON (Exact Line #)';
+  } catch (e) {                                                   // no usable PDF/JSON file -> gDoc estimate
+    mode = 'sim'; label = 'gDoc (Estimated Line #)';
     note = 'Using estimated numbers — no usable PDF/JSON line-number file. ' +
            'Set one in QuoteFinder → Settings… for exact numbers.';
   }
 
-  var rows = collectPreviewRows_(c, index);
-  showPreviewHtml_(rows, label, note, c.HIGHLIGHTED_ONLY);
+  var rows = collectPreviewRows_(c, simIndex, exactIndex, mode);
+  showPreviewHtml_(rows, label, note, sigCount_(c._selectionSigs), c._selectionSigs != null);
 }
 
-function collectPreviewRows_(c, index) {
+function collectPreviewRows_(c, simIndex, exactIndex, mode) {
   var body = DocumentApp.getActiveDocument().getBody();
   var units = [];
   for (var i = 0; i < body.getNumChildren(); i++) collectUnits_(body.getChild(i), units, false);
@@ -835,9 +1191,9 @@ function collectPreviewRows_(c, index) {
     for (var mi = 0; mi < markers.length; mi++) {
       var mk = markers[mi];
       if (!markerInScope_(c, textEl, mk)) continue;
-      if (mk.kind === 'bad') { rows.push({ old: mk.oldNum, quote: '⚠ ' + mk.reason, lines: 'malformed', found: false }); continue; }
-      var info = lookupLineRange_(index, mk.quoteRaw, c);   // split quotes -> first..last range
-      rows.push({ old: mk.oldNum, quote: snippet_(mk.quoteRaw), lines: fmtLines_(info), found: !!info.found });
+      if (mk.kind === 'bad') { rows.push({ old: c.HOOK + mk.context + ' …', quote: '⚠ ' + mk.reason, lines: 'malformed', found: false }); continue; }
+      var info = lookupLineRange_(simIndex, exactIndex, mode, mk.quoteRaw, c);   // split quotes -> first..last range
+      rows.push({ old: mk.oldNum, quote: snippet_(mk.quoteRaw), lines: fmtLines_(info), found: !!info.found, estimated: !!info.estimated });
     }
   }
   return rows;
@@ -849,18 +1205,22 @@ function fmtLines_(info) {
   return info.startLine === info.endLine ? ('' + info.startLine) : (info.startLine + '-' + info.endLine);
 }
 
-function showPreviewHtml_(rows, engineLabel, note, highlightedOnly) {
+function showPreviewHtml_(rows, engineLabel, note, selCount, selActive) {
   var h = ['<style>body{font:13px Arial;margin:8px}table{border-collapse:collapse;width:100%}',
     'td,th{border:1px solid #ccc;padding:3px 6px;text-align:left;vertical-align:top}',
-    'th{background:#f0f0f0}.no{background:#f4cccc}</style>'];
-  h.push('<p><b>' + rows.length + ' marker(s)' + (highlightedOnly ? ' — highlighted only' : '') + '.</b> ' +
-    'Line numbers from <b>' + esc_(engineLabel) + '</b>. Dry run — nothing was changed.</p>');
+    'th{background:#f0f0f0}.no{background:#f4cccc}.est{background:#fff2cc}</style>'];
+  var scopeTxt = selActive ? (' — Scope: ' + (selCount || 0) + ' selected quote(s)') : '';
+  h.push('<p><b>' + rows.length + ' marker(s)' + scopeTxt + '.</b> ' +
+    'Line numbers from <b>' + esc_(engineLabel) + '</b>. Dry run — nothing was changed. ' +
+    '<span style="background:#fff2cc">Yellow</span> = PDF couldn\'t pin it, gDoc estimate used.</p>');
+  if (selActive && !rows.length) h.push('<p style="color:#b06000">Your selection contained no @AUTOLINE markers. Select the quote line(s) you want, then run Preview again.</p>');
   if (note) h.push('<p style="color:#b06000">' + esc_(note) + '</p>');
   h.push('<table><tr><th>#</th><th>old</th><th>quote</th><th>new # (' + esc_(engineLabel) + ')</th></tr>');
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
+    var cls = !r.found ? ' class="no"' : (r.estimated ? ' class="est"' : '');
     h.push('<tr><td>' + (i + 1) + '</td><td>' + esc_(r.old) + '</td><td>' + esc_(r.quote) + '</td>' +
-      '<td' + (r.found ? '' : ' class="no"') + '>' + esc_(r.lines) + '</td></tr>');
+      '<td' + cls + '>' + esc_(r.lines) + (r.estimated ? ' (est)' : '') + '</td></tr>');
   }
   h.push('</table>');
   DocumentApp.getUi().showModalDialog(HtmlService.createHtmlOutput(h.join('')).setWidth(680).setHeight(560), 'QuoteFinder — preview (dry run)');
@@ -942,11 +1302,11 @@ function fuzzyInParagraph_(pn, qnorm, ws) {
 // Locate a quote in the manuscript: exact, else best fuzzy candidate.
 // Returns the manuscript paragraph + raw offsets (for text/formatting) and the
 // candidate's line numbers (from the chosen engine).
-function locateCandidate_(primary, mode, exactIndex, qnorm) {
+function locateCandidate_(primary, mode, exactIndex, qnorm, c) {
   if (!qnorm) return { status: 'notfound' };
   for (var i = 0; i < primary.paras.length; i++) {           // exact in a paragraph
     var pos = primary.paras[i].norm.indexOf(qnorm);
-    if (pos >= 0) return finishCandidate_(primary, mode, exactIndex, primary.paras[i], pos, pos + qnorm.length, qnorm, 1, 'exact');
+    if (pos >= 0) return finishCandidate_(primary, mode, exactIndex, primary.paras[i], pos, pos + qnorm.length, qnorm, 1, 'exact', c);
   }
   var ws = words_(qnorm);
   if (!ws.length) return { status: 'notfound' };
@@ -965,49 +1325,49 @@ function locateCandidate_(primary, mode, exactIndex, qnorm) {
     }
   }
   if (!best || best.sim < 0.25) return { status: 'notfound' };
-  return finishCandidate_(primary, mode, exactIndex, primary.paras[best.idx], best.S, best.E, qnorm, best.sim, 'fuzzy');
+  return finishCandidate_(primary, mode, exactIndex, primary.paras[best.idx], best.S, best.E, qnorm, best.sim, 'fuzzy', c);
 }
 
-function finishCandidate_(primary, mode, exactIndex, para, S, E, qnorm, sim, status) {
+function finishCandidate_(primary, mode, exactIndex, para, S, E, qnorm, sim, status, c) {
   var candNorm = para.norm.substring(S, E);
-  var lines = candidateLines_(mode, exactIndex, para, S, E, candNorm);
+  var lines = candidateLines_(mode, exactIndex, para, S, E, candNorm, c);
   return {
     status: status, similarity: sim, srcParaIndex: para.idx, srcNormPos: S,
     srcRawStart: para.map[S], srcRawEndIncl: para.map[E - 1],
-    startLine: lines.start, endLine: lines.end, candNorm: candNorm
+    startLine: lines.start, endLine: lines.end, candNorm: candNorm,
+    lineEstimated: !!lines.estimated
   };
 }
-function candidateLines_(mode, exactIndex, para, S, E, candNorm) {
-  if (mode === 'sim') {
-    return {
-      start: para.startLine + lineForRaw_(para.lineStarts, para.map[S]),
-      end:   para.startLine + lineForRaw_(para.lineStarts, para.map[E - 1])
-    };
-  }
-  var loc = locate_(exactIndex, candNorm);             // exact engine: find the text in the PDF map
-  return loc.found ? { start: loc.startLine, end: loc.endLine } : { start: null, end: null };
+// gDoc/sim estimate from the doc layout; in exact mode, fine-tune via the PDF.
+function candidateLines_(mode, exactIndex, para, S, E, candNorm, c) {
+  var estStart = para.startLine + lineForRaw_(para.lineStarts, para.map[S]);
+  var estEnd   = para.startLine + lineForRaw_(para.lineStarts, para.map[E - 1]);
+  if (mode === 'sim') return { start: estStart, end: estEnd, estimated: false };
+  var r = refinePieceWithPdf_(exactIndex, candNorm, estStart, estEnd, c);
+  return { start: r.start, end: r.end, estimated: r.estimated };
 }
 
 // Split-quote aware candidate: a quote with [...] is matched piece-by-piece; the
 // reported range spans the first piece's start to the last piece's end.
 function locateCandidate2_(primary, mode, exactIndex, quoteRaw, c) {
-  if (!hasElision_(quoteRaw)) return locateCandidate_(primary, mode, exactIndex, normalize_(quoteRaw, c.CASE_INSENSITIVE).norm);
+  if (!hasElision_(quoteRaw)) return locateCandidate_(primary, mode, exactIndex, normalize_(quoteRaw, c.CASE_INSENSITIVE).norm, c);
   var pieces = splitQuote_(quoteRaw);
   if (!pieces.length) return { status: 'notfound' };
   var cands = [];
   for (var i = 0; i < pieces.length; i++) {
-    var cand = locateCandidate_(primary, mode, exactIndex, normalize_(pieces[i].raw, c.CASE_INSENSITIVE).norm);
+    var cand = locateCandidate_(primary, mode, exactIndex, normalize_(pieces[i].raw, c.CASE_INSENSITIVE).norm, c);
     if (cand.status === 'notfound') return { status: 'notfound' };
     cands.push(cand);
   }
-  var first = cands[0], last = cands[cands.length - 1], allExact = true, minSim = 1;
+  var first = cands[0], last = cands[cands.length - 1], allExact = true, minSim = 1, anyEst = false;
   for (var k = 0; k < cands.length; k++) {
     if (!(cands[k].status === 'exact' && cands[k].startLine != null)) allExact = false;
     if (cands[k].similarity < minSim) minSim = cands[k].similarity;
+    if (cands[k].lineEstimated) anyEst = true;
   }
   return {
     status: (allExact && first.startLine != null && last.endLine != null) ? 'exact' : 'fuzzy',
-    similarity: minSim, split: true, pieces: cands,
+    similarity: minSim, split: true, pieces: cands, lineEstimated: anyEst,
     srcParaIndex: first.srcParaIndex, srcNormPos: first.srcNormPos,
     srcRawStart: first.srcRawStart, srcRawEndIncl: first.srcRawEndIncl,
     startLine: first.startLine, endLine: last.endLine
@@ -1022,31 +1382,25 @@ function candNewText_(primary, cand) {
   return primary.paras[cand.srcParaIndex].raw.substring(cand.srcRawStart, cand.srcRawEndIncl + 1);
 }
 
-// ---- formatted-HTML + diff rendering --------------------------------------
-function styleHtmlAt_(t, o) {
-  var a = t.getTextAlignment(o);
-  var al = (a === DocumentApp.TextAlignment.SUPERSCRIPT) ? 'SUP'
-         : (a === DocumentApp.TextAlignment.SUBSCRIPT) ? 'SUB' : 'NORM';
-  return { bold: !!t.isBold(o), italic: !!t.isItalic(o), color: t.getForegroundColor(o) || '#000000', align: al };
-}
-function eqHtmlStyle_(a, b) { return a.bold === b.bold && a.italic === b.italic && a.color === b.color && a.align === b.align; }
+// ---- formatted-HTML + diff rendering (styles read once per run) ------------
 function rangeToHtml_(textEl, start, endIncl) {
   if (endIncl < start) return '<em>(empty)</em>';
   var T = textEl.getText();
+  var runs = styleRuns_(textEl);
   var html = [];
   function emit(a, b, st) {
     var open = [], close = [];
-    if (st.align === 'SUP') { open.push('<sup>'); close.unshift('</sup>'); }
-    else if (st.align === 'SUB') { open.push('<sub>'); close.unshift('</sub>'); }
+    if (st.align === DocumentApp.TextAlignment.SUPERSCRIPT) { open.push('<sup>'); close.unshift('</sup>'); }
+    else if (st.align === DocumentApp.TextAlignment.SUBSCRIPT) { open.push('<sub>'); close.unshift('</sub>'); }
     if (st.bold) { open.push('<b>'); close.unshift('</b>'); }
     if (st.italic) { open.push('<i>'); close.unshift('</i>'); }
     if (st.color && st.color !== '#000000') { open.push('<span style="color:' + st.color + '">'); close.unshift('</span>'); }
     html.push(open.join('') + esc_(T.substring(a, b + 1)) + close.join(''));
   }
-  var runStart = start, cur = styleHtmlAt_(textEl, start);
+  var runStart = start, cur = styleAt_(runs, start);
   for (var o = start + 1; o <= endIncl; o++) {
-    var st = styleHtmlAt_(textEl, o);
-    if (!eqHtmlStyle_(st, cur)) { emit(runStart, o - 1, cur); runStart = o; cur = st; }
+    var st = styleAt_(runs, o);
+    if (!eqStyle_(st, cur)) { emit(runStart, o - 1, cur); runStart = o; cur = st; }
   }
   emit(runStart, endIncl, cur);
   return html.join('');
@@ -1069,10 +1423,25 @@ function wordDiffHtml_(oldS, newS) {                    // word-level diff, manu
   return out.join(' ');
 }
 
+// Parse the old line number(s) out of a marker's oldNum prefix (HOOK + optional n|a-b + colon/ws;
+// see where oldNum is set). Returns { hadNumber, start, end }. No digits (bare hook, "@AUTOLINE:")
+// => hadNumber:false (a first-time numbering counts as a change); 0 is a real number.
+function parseOldNum_(oldNum, c) {
+  var hook = (c && c.HOOK) || '@AUTOLINE';
+  var s = String(oldNum == null ? '' : oldNum);
+  if (s.indexOf(hook) === 0) s = s.slice(hook.length);     // strip the hook prefix
+  var m = s.match(/(\d+)\s*-\s*(\d+)|(\d+)/);               // range first, else a single number
+  if (!m) return { hadNumber: false, start: null, end: null };
+  if (m[1] != null) return { hadNumber: true, start: parseInt(m[1], 10), end: parseInt(m[2], 10) };
+  var n = parseInt(m[3], 10);
+  return { hadNumber: true, start: n, end: n };
+}
+
 // ---- server entry points called from the sidebar --------------------------
 function buildReviewData(mode) {
   var c = cfg();
-  var primary = buildPrimaryIndex_(c, mode === 'sim');
+  c._selectionSigs = readSelectionSnapshot_();      // selection captured when the panel opened (session-fixed)
+  var primary = buildPrimaryIndex_(c, true);   // always build the sim layout (gDoc estimate, even in exact mode)
   var exactIndex = (mode === 'exact') ? buildExactIndex_(c, loadExactMap_(c)) : null;
 
   var body = DocumentApp.getActiveDocument().getBody();
@@ -1080,28 +1449,36 @@ function buildReviewData(mode) {
   for (var i = 0; i < body.getNumChildren(); i++) collectUnits_(body.getChild(i), units, false);
 
   var ordinal = 0, total = 0, exactCount = 0, malformedCount = 0, items = [];
+  var allMarkers = 0;                             // diagnostic: total markers seen in the doc
   var re = markerScanner_(c);
   for (var u = 0; u < units.length; u++) {
     var para = units[u].el, textEl = para.editAsText();
     var markers = parseMarkersInPara_(para, re);
     for (var mi = 0; mi < markers.length; mi++) {
       var mk = markers[mi];
-      if (!markerInScope_(c, textEl, mk)) { ordinal++; continue; } // out of scope: keep ordinals aligned
+      allMarkers++;
+      var inScope = c._selectionSigs ? markerInScope_(c, textEl, mk) : true;   // selection limits; else whole doc
+      if (!inScope) { ordinal++; continue; }       // out of scope: keep ordinals aligned (stable IDs)
       total++;
       if (mk.kind === 'bad') {                       // hook present, quote missing/unterminated/empty
         malformedCount++;
         items.push({
           ordinal: ordinal, oldNum: mk.oldNum, status: 'malformed', reason: mk.reason,
-          similarity: 0, startLine: null, endLine: null,
-          oldHtml: rangeToHtml_(textEl, mk.matchStart, mk.matchStart + mk.prefixLen - 1), newHtml: '', diffHtml: ''
+          context: c.HOOK + mk.context, similarity: 0, startLine: null, endLine: null,
+          numberChanged: false,
+          oldHtml: esc_(c.HOOK + mk.context) + ' <span class="muted">…</span>', newHtml: '', diffHtml: ''
         });
         ordinal++; continue;
       }
       var cand = locateCandidate2_(primary, mode, exactIndex, mk.quoteRaw, c);  // split-quote aware
       var isExact = (cand.status === 'exact' && cand.startLine != null);
-      if (isExact) exactCount++;
+      var isEstimated = !!cand.lineEstimated;       // PDF couldn't pin it -> gDoc estimate used
+      if (isExact && !isEstimated) exactCount++;     // an estimated line isn't "perfect" — surface it
 
       var hasCand = (cand.status !== 'notfound');
+      var oldN = parseOldNum_(mk.oldNum, c);          // is the line NUMBER actually moving? (for the "Line # only" tab)
+      var numberChanged = hasCand && cand.startLine != null &&
+        (!oldN.hadNumber || oldN.start !== cand.startLine || oldN.end !== cand.endLine);
       items.push({                                  // EVERY in-scope marker (client filters the view)
         ordinal: ordinal,
         oldNum: mk.oldNum,
@@ -1110,6 +1487,8 @@ function buildReviewData(mode) {
         startLine: hasCand ? cand.startLine : null,
         endLine: hasCand ? cand.endLine : null,
         split: !!cand.split,
+        numberChanged: numberChanged,
+        lineEstimated: hasCand ? isEstimated : false,
         oldHtml: rangeToHtml_(textEl, mk.quoteRawStart, mk.quoteRawEnd - 1),
         newHtml: hasCand ? candNewHtml_(primary, cand) : '',
         diffHtml: hasCand ? wordDiffHtml_(mk.quoteRaw, candNewText_(primary, cand)) : ''
@@ -1118,7 +1497,9 @@ function buildReviewData(mode) {
     }
   }
   return { mode: mode, total: total, exactCount: exactCount, imperfectCount: total - exactCount,
-           malformedCount: malformedCount, items: items, scope: c.HIGHLIGHTED_ONLY ? 'highlighted' : 'all' };
+           malformedCount: malformedCount, items: items,
+           scope: c._selectionSigs ? 'selection' : 'all',
+           selectionCount: sigCount_(c._selectionSigs), allMarkers: allMarkers };
 }
 
 // Apply one pass; edits within each paragraph go right-to-left so offsets stay
@@ -1127,11 +1508,15 @@ function buildReviewData(mode) {
 // rest (so "only changes" view still auto-applies the perfect ones).
 function applyReviewDecisions(mode, decisionsJson) {
   var c = cfg();
+  c._selectionSigs = readSelectionSnapshot_();      // same snapshot the panel scanned with
+  c._markerStyle = resolveMarkerStyle_(c);          // scaffold style (hook/number/colon/quote marks)
   var dec = {};
   try { dec = JSON.parse(decisionsJson || '{}') || {}; } catch (e) { dec = {}; }
 
-  var primary = buildPrimaryIndex_(c, mode === 'sim');
+  var primary = buildPrimaryIndex_(c, true);   // always build the sim layout (gDoc estimate, even in exact mode)
   var exactIndex = (mode === 'exact') ? buildExactIndex_(c, loadExactMap_(c)) : null;
+
+  if (!c._selectionSigs) clearFlags_(c);   // whole-doc only; selection leaves other markers alone
 
   var body = DocumentApp.getActiveDocument().getBody();
   var units = [];
@@ -1147,8 +1532,15 @@ function applyReviewDecisions(mode, decisionsJson) {
       .forEach(function (mk) {
         if (!markerInScope_(c, textEl, mk)) return;                    // leave out-of-scope untouched
         if (mk.kind === 'bad') {                                       // flag malformed markers red, never edit
-          if (!c.HIGHLIGHTED_ONLY) bg_(textEl, mk.matchStart, mk.matchStart + mk.prefixLen - 1, c.NOTFOUND_COLOR);
+          bg_(textEl, mk.matchStart, mk.matchStart + mk.prefixLen - 1, c.NOTFOUND_COLOR);
           n.flagged++; return;
+        }
+        // Selection mode skips the global clearFlags_, so clear an in-scope OK marker's
+        // stale red/yellow shade here (the applied path also self-cleans; this also covers
+        // the skip / use-but-unresolved paths, matching whole-doc behavior).
+        if (c._selectionSigs) {
+          var pbg; try { pbg = textEl.getBackgroundColor(mk.matchStart); } catch (e) { pbg = null; }
+          if (isFlagShade_(pbg, c)) bg_(textEl, mk.matchStart, mk.matchStart + mk.prefixLen - 1, null);
         }
         var cand = locateCandidate2_(primary, mode, exactIndex, mk.quoteRaw, c);  // split-quote aware
         var isExact = (cand.status === 'exact' && cand.startLine != null);
@@ -1168,11 +1560,24 @@ function applyReviewDecisions(mode, decisionsJson) {
 // replaceText=true -> swap the quote for the manuscript text + its formatting.
 // Always refresh the @AUTOLINE number. Order: quote edits first, prefix last.
 function applyMarker_(textEl, mk, primary, cand, c, replaceText) {
-  if (cand.split || hasElision_(mk.quoteRaw)) {        // split quote: keep the user's elided text, copy formatting per piece
-    if (c.COPY_FORMATTING) copyPartsFormatting_(primary, textEl, mk.quoteRawStart, mk.quoteRaw, c);
+  var newBodyLen = mk.quoteRawEnd - mk.quoteRawStart;  // unchanged unless we replace the text (fuzzy)
+  if (cand.split || hasElision_(mk.quoteRaw)) {        // split quote (with [...])
+    var did = false;
+    if (replaceText && cand.split && cand.pieces) {    // "Use manuscript": correct each fuzzy piece, keep the [...]
+      var rebuilt = rebuildSplitQuote_(mk.quoteRaw, cand.pieces, primary, c);
+      if (rebuilt != null && rebuilt !== mk.quoteRaw) {
+        newBodyLen = rebuilt.length;
+        textEl.deleteText(mk.quoteRawStart, mk.quoteRawEnd - 1);
+        textEl.insertText(mk.quoteRawStart, rebuilt);
+        if (c.COPY_FORMATTING) copyPartsFormatting_(primary, textEl, mk.quoteRawStart, rebuilt, c);
+        did = true;
+      }
+    }
+    if (!did && c.COPY_FORMATTING) copyPartsFormatting_(primary, textEl, mk.quoteRawStart, mk.quoteRaw, c);
   } else if (replaceText) {
     var src = primary.paras[cand.srcParaIndex];
     var newTextRaw = src.raw.substring(cand.srcRawStart, cand.srcRawEndIncl + 1);
+    newBodyLen = newTextRaw.length;
     textEl.deleteText(mk.quoteRawStart, mk.quoteRawEnd - 1);
     textEl.insertText(mk.quoteRawStart, newTextRaw);
     if (c.COPY_FORMATTING) copyRangeIdentity_(src.textEl, cand.srcRawStart, cand.srcRawEndIncl, textEl, mk.quoteRawStart);
@@ -1187,4 +1592,59 @@ function applyMarker_(textEl, mk, primary, cand, c, replaceText) {
   var newPrefix = c.HOOK + numStr + ': ';
   textEl.deleteText(mk.matchStart, mk.matchStart + mk.prefixLen - 1);
   textEl.insertText(mk.matchStart, newPrefix);
+  // An estimated line (PDF couldn't pin it) is flagged yellow so you know to check it;
+  // otherwise drop any stale flag shade inherited by the rewritten prefix (never a
+  // highlight YOU applied), so a cleanly-resolved marker self-cleans.
+  if (cand.lineEstimated) {
+    bg_(textEl, mk.matchStart, mk.matchStart + newPrefix.length - 1, c.LOWCONF_COLOR);
+  } else {
+    var pbg; try { pbg = textEl.getBackgroundColor(mk.matchStart); } catch (e) { pbg = null; }
+    if (isFlagShade_(pbg, c)) bg_(textEl, mk.matchStart, mk.matchStart + newPrefix.length - 1, null);
+  }
+  // style the scaffold (hook + number + colon + quote marks) — current layout after the rewrite
+  if (c._markerStyle) {
+    var openLen = mk.openLen != null ? mk.openLen : (mk.quoteRawStart - mk.matchStart - mk.prefixLen);
+    var closeLen = mk.closeLen != null ? mk.closeLen : 1;
+    var base = mk.matchStart + newPrefix.length;       // first char after the rewritten prefix = opening mark
+    var closeStart = base + openLen + newBodyLen;
+    styleMarkerScaffold_(textEl, mk.matchStart, base + openLen - 1, closeStart, closeStart + closeLen - 1, c._markerStyle);
+  }
+}
+
+// Apply ONE marker, found fresh by its ordinal (Nth marker in document order) so a
+// prior edit can't have moved it — same engine as the bulk Apply, scoped to one.
+// Returns {ok, msg, startLine, endLine}. Note: like Apply, this re-reads the
+// manuscript, so it costs about as much per click as a full Apply.
+function applyOne(mode, ordinal) {
+  var c = cfg();
+  c._selectionSigs = readSelectionSnapshot_();      // same snapshot the panel scanned with
+  c._markerStyle = resolveMarkerStyle_(c);          // scaffold style (hook/number/colon/quote marks)
+  var primary = buildPrimaryIndex_(c, true);   // always build the sim layout (gDoc estimate, even in exact mode)
+  var exactIndex = (mode === 'exact') ? buildExactIndex_(c, loadExactMap_(c)) : null;
+
+  var body = DocumentApp.getActiveDocument().getBody();
+  var units = [];
+  for (var i = 0; i < body.getNumChildren(); i++) collectUnits_(body.getChild(i), units, false);
+
+  var ord = 0, re = markerScanner_(c);
+  for (var u = 0; u < units.length; u++) {
+    var para = units[u].el, textEl = para.editAsText();
+    var markers = parseMarkersInPara_(para, re);
+    for (var mi = 0; mi < markers.length; mi++) {
+      var mk = markers[mi];
+      if (ord++ !== ordinal) continue;                 // not this one (ordinals match buildReviewData)
+      if (!markerInScope_(c, textEl, mk)) return { ok: false, msg: 'That marker is out of the current scope.' };
+      if (mk.kind === 'bad') return { ok: false, msg: 'Malformed marker — fix it in the document.' };
+      var cand = locateCandidate2_(primary, mode, exactIndex, mk.quoteRaw, c);
+      if (cand.status === 'notfound' || cand.startLine == null)
+        return { ok: false, msg: 'No manuscript match / line number for that quote.' };
+      var replace = (cand.status === 'fuzzy');
+      applyMarker_(textEl, mk, primary, cand, c, replace);   // edits this one marker only, then returns
+      var lineStr = (cand.startLine === cand.endLine) ? ('' + cand.startLine) : (cand.startLine + '–' + cand.endLine);
+      return { ok: true, startLine: cand.startLine, endLine: cand.endLine, estimated: !!cand.lineEstimated,
+               msg: (replace ? 'Replaced text + number + formatting' : 'Refreshed number + formatting') + ' — line ' + lineStr +
+                    (cand.lineEstimated ? ' (estimated — PDF couldn\'t pin it)' : '') + '.' };
+    }
+  }
+  return { ok: false, msg: 'Could not find that marker — click ↻ Rescan (did the markers change?).' };
 }
