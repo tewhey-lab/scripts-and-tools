@@ -131,12 +131,13 @@ case-by-case: **QuoteFinder → Review & update (step through imperfect) ▸ gDo
 opens that **floats over the doc but doesn't block it** — you can still scroll and
 edit while it's open.
 
-- Three **category tabs** at the top: **Changes** (default — anything that will change
-  on apply: edited/typo'd text, not-found/malformed markers, **and** exact matches whose
-  line number is moving), **Line # only** (a subset — exact-text matches whose *only*
-  change is the line number, incl. low-confidence "estimated" lines), and **All** (every
-  marker in scope, including the no-op perfect ones). The tabs only filter what you step
-  through; they never change what **Apply** does.
+- Three **category tabs** at the top, **Changes** (default) and **Line # only** being
+  mutually exclusive: **Changes** = anything needing review (edited/typo'd text that no
+  longer matches, not-found and malformed markers, **and** exact matches whose line number
+  is a low-confidence "estimated" one); **Line # only** = exact-text matches whose number
+  changed and is **confident** (a clean renumber); **All** = every marker in scope,
+  including the no-op perfect ones. The tabs only filter what you step through; they never
+  change what **Apply** does (Apply still refreshes every perfect/renumbered marker regardless of tab).
 - The **decision and navigation buttons sit above the quote text** (Use manuscript / Skip,
   and ◀ Prev / Next ▶), so they stay put even when a long quote grows the card.
 - Each card shows a **match %** badge, the manuscript line(s) the candidate sits on,

@@ -107,10 +107,12 @@
     var busy = false;
 
     function $(id) { return document.getElementById(id); }
-    // "Changes": anything that will change on apply — text differs, OR the line number is moving/uncertain.
-    function isChange(it) { return it.status !== 'exact' || it.startLine == null || it.lineEstimated || it.numberChanged; }
-    // "Line # only": a strict subset — exact-text matches whose ONLY change is the line number.
-    function isLineOnly(it) { return it.status === 'exact' && it.startLine != null && (it.numberChanged || it.lineEstimated); }
+    // "Changes": anything needing review — malformed, not-found, text that doesn't match, OR an
+    // exact match whose line number is a low-confidence "estimated" one (uncertain → review it).
+    function isChange(it) { return it.status !== 'exact' || it.startLine == null || it.lineEstimated; }
+    // "Line # only": exact-text matches whose number changed and is CONFIDENT (not estimated) —
+    // a clean renumber. Mutually EXCLUSIVE with "Changes".
+    function isLineOnly(it) { return it.status === 'exact' && it.startLine != null && it.numberChanged && !it.lineEstimated; }
     function shown() {
       if (view === 'all') return items;
       if (view === 'line') return items.filter(isLineOnly);
@@ -185,9 +187,9 @@
         $('empty').textContent = (DATA.scope === 'selection' && DATA.total === 0)
           ? 'No @AUTOLINE markers were inside your selection. Reopen the panel with the quote line(s) selected.'
           : (view === 'changes'
-              ? 'Nothing needs review — all ' + DATA.exactCount + ' match exactly and no line numbers move. They’ll be refreshed when you click Apply.'
+              ? 'Nothing needs review — every quote matches the manuscript word-for-word and every line number is confident. Check “Line # only” for line-number updates, or “All” for everything.'
               : view === 'line'
-                ? 'No line-number-only changes — every exact match already has the right number. Check the Changes tab for text edits.'
+                ? 'No confident line-number-only changes — exact matches already have the right number. Check the Changes tab for text edits or uncertain (estimated) lines.'
                 : 'No @AUTOLINE markers in scope.');
       } else {
         $('empty').style.display = 'none'; $('card').style.display = 'block';
